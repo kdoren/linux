@@ -131,7 +131,7 @@ config BCM7120_L2_IRQ
 	select IRQ_DOMAIN
 
 config BRCMSTB_L2_IRQ
-	bool
+	bool "Broadcom STB L2 Interrupt Controller"
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
 
