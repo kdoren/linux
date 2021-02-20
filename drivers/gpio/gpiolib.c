@@ -604,7 +604,11 @@ int gpiochip_add_data_with_key(struct gpio_chip *gc, void *data,
 		ret = gdev->id;
 		goto err_free_gdev;
 	}
-	dev_set_name(&gdev->dev, GPIOCHIP_NAME "%d", gdev->id);
+
+	ret = dev_set_name(&gdev->dev, GPIOCHIP_NAME "%d", gdev->id);
+	if (ret)
+		goto err_free_ida;
+
 	device_initialize(&gdev->dev);
 	dev_set_drvdata(&gdev->dev, gdev);
 	if (gc->parent && gc->parent->driver)
@@ -618,7 +622,7 @@ int gpiochip_add_data_with_key(struct gpio_chip *gc, void *data,
 	gdev->descs = kcalloc(gc->ngpio, sizeof(gdev->descs[0]), GFP_KERNEL);
 	if (!gdev->descs) {
 		ret = -ENOMEM;
-		goto err_free_ida;
+		goto err_free_dev_name;
 	}
 
 	if (gc->ngpio == 0) {
@@ -769,6 +773,8 @@ err_free_label:
 	kfree_const(gdev->label);
 err_free_descs:
 	kfree(gdev->descs);
+err_free_dev_name:
+	kfree(dev_name(&gdev->dev));
 err_free_ida:
 	ida_free(&gpio_ida, gdev->id);
 err_free_gdev:
@@ -1479,7 +1485,8 @@ static void gpiochip_set_irq_hooks(struct gpio_chip *gc)
 	if (WARN_ON(gc->irq.irq_enable))
 		return;
 	/* Check if the irqchip already has this hook... */
-	if (irqchip->irq_enable == gpiochip_irq_enable) {
+	if (irqchip->irq_enable == gpiochip_irq_enable ||
+		irqchip->irq_mask == gpiochip_irq_mask) {
 		/*
 		 * ...and if so, give a gentle warning that this is bad
 		 * practice.
@@ -1808,6 +1815,11 @@ EXPORT_SYMBOL_GPL(gpiochip_generic_request);
  */
 void gpiochip_generic_free(struct gpio_chip *gc, unsigned offset)
 {
+#ifdef CONFIG_PINCTRL
+	if (list_empty(&gc->gpiodev->pin_ranges))
+		return;
+#endif
+
 	pinctrl_gpio_free(gc->gpiodev->base + offset);
 }
 EXPORT_SYMBOL_GPL(gpiochip_generic_free);

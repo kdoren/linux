@@ -68,9 +68,20 @@ bool ring_buffer_expanded;
 static bool __read_mostly tracing_selftest_running;
 
 /*
- * If a tracer is running, we do not want to run SELFTEST.
+ * If boot-time tracing including tracers/events via kernel cmdline
+ * is running, we do not want to run SELFTEST.
  */
 bool __read_mostly tracing_selftest_disabled;
+
+#ifdef CONFIG_FTRACE_STARTUP_TEST
+void __init disable_tracing_selftest(const char *reason)
+{
+	if (!tracing_selftest_disabled) {
+		tracing_selftest_disabled = true;
+		pr_info("Ftrace startup test is disabled due to %s\n", reason);
+	}
+}
+#endif
 
 /* Pipe tracepoints to printk */
 struct trace_iterator *tracepoint_print_iter;
@@ -163,7 +174,8 @@ static union trace_eval_map_item *trace_eval_maps;
 #endif /* CONFIG_TRACE_EVAL_MAP_FILE */
 
 int tracing_set_tracer(struct trace_array *tr, const char *buf);
-static void ftrace_trace_userstack(struct trace_buffer *buffer,
+static void ftrace_trace_userstack(struct trace_array *tr,
+				   struct trace_buffer *buffer,
 				   unsigned long flags, int pc);
 
 #define MAX_TRACER_SIZE		100
@@ -2112,11 +2124,7 @@ int __init register_tracer(struct tracer *type)
 	apply_trace_boot_options();
 
 	/* disable other selftests, since this will break it. */
-	tracing_selftest_disabled = true;
-#ifdef CONFIG_FTRACE_STARTUP_TEST
-	printk(KERN_INFO "Disabling FTRACE selftests due to running tracer '%s'\n",
-	       type->name);
-#endif
+	disable_tracing_selftest("running a tracer");
 
  out_unlock:
 	return ret;
@@ -2870,7 +2878,7 @@ void trace_buffer_unlock_commit_regs(struct trace_array *tr,
 	 * two. They are not that meaningful.
 	 */
 	ftrace_trace_stack(tr, buffer, flags, regs ? 0 : STACK_SKIP, pc, regs);
-	ftrace_trace_userstack(buffer, flags, pc);
+	ftrace_trace_userstack(tr, buffer, flags, pc);
 }
 
 /*
@@ -3056,13 +3064,14 @@ EXPORT_SYMBOL_GPL(trace_dump_stack);
 static DEFINE_PER_CPU(int, user_stack_count);
 
 static void
-ftrace_trace_userstack(struct trace_buffer *buffer, unsigned long flags, int pc)
+ftrace_trace_userstack(struct trace_array *tr,
+		       struct trace_buffer *buffer, unsigned long flags, int pc)
 {
 	struct trace_event_call *call = &event_user_stack;
 	struct ring_buffer_event *event;
 	struct userstack_entry *entry;
 
-	if (!(global_trace.trace_flags & TRACE_ITER_USERSTACKTRACE))
+	if (!(tr->trace_flags & TRACE_ITER_USERSTACKTRACE))
 		return;
 
 	/*
@@ -3101,7 +3110,8 @@ ftrace_trace_userstack(struct trace_buffer *buffer, unsigned long flags, int pc)
 	preempt_enable();
 }
 #else /* CONFIG_USER_STACKTRACE_SUPPORT */
-static void ftrace_trace_userstack(struct trace_buffer *buffer,
+static void ftrace_trace_userstack(struct trace_array *tr,
+				   struct trace_buffer *buffer,
 				   unsigned long flags, int pc)
 {
 }

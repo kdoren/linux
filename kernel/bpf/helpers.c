@@ -108,7 +108,7 @@ BPF_CALL_2(bpf_map_peek_elem, struct bpf_map *, map, void *, value)
 }
 
 const struct bpf_func_proto bpf_map_peek_elem_proto = {
-	.func		= bpf_map_pop_elem,
+	.func		= bpf_map_peek_elem,
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
 	.arg1_type	= ARG_CONST_MAP_PTR,
@@ -717,9 +717,9 @@ bpf_base_func_proto(enum bpf_func_id func_id)
 		return &bpf_snprintf_btf_proto;
 	case BPF_FUNC_jiffies64:
 		return &bpf_jiffies64_proto;
-	case BPF_FUNC_bpf_per_cpu_ptr:
+	case BPF_FUNC_per_cpu_ptr:
 		return &bpf_per_cpu_ptr_proto;
-	case BPF_FUNC_bpf_this_cpu_ptr:
+	case BPF_FUNC_this_cpu_ptr:
 		return &bpf_this_cpu_ptr_proto;
 	default:
 		break;

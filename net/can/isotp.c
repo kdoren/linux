@@ -1139,6 +1139,7 @@ static int isotp_getname(struct socket *sock, struct sockaddr *uaddr, int peer)
 	if (peer)
 		return -EOPNOTSUPP;
 
+	memset(addr, 0, sizeof(*addr));
 	addr->can_family = AF_CAN;
 	addr->can_ifindex = so->ifindex;
 	addr->can_addr.tp.rx_id = so->rxid;
@@ -1156,6 +1157,9 @@ static int isotp_setsockopt(struct socket *sock, int level, int optname,
 
 	if (level != SOL_CAN_ISOTP)
 		return -EINVAL;
+
+	if (so->bound)
+		return -EISCONN;
 
 	switch (optname) {
 	case CAN_ISOTP_OPTS:

@@ -50,7 +50,7 @@ enum imx290_clk_index {
 #define IMX290_HMAX_MIN_4LANE 2200 /* Min of 2200 pixels = 60fps */
 #define IMX290_HMAX_MAX 0xffff
 
-#define IMX290_EXPOSURE_MIN 2
+#define IMX290_EXPOSURE_MIN 1
 #define IMX290_EXPOSURE_STEP 1
 #define IMX290_EXPOSURE_LOW 0x3020
 #define IMX290_PGCTRL 0x308c
@@ -584,7 +584,7 @@ static int imx290_set_gain(struct imx290 *imx290, u32 value)
 static int imx290_set_exposure(struct imx290 *imx290, u32 value)
 {
 	u32 exposure = (imx290->current_mode->height + imx290->vblank->val) -
-						value;
+						value - 1;
 	int ret;
 
 	ret = imx290_write_buffered_reg(imx290, IMX290_EXPOSURE_LOW, 3,
@@ -618,6 +618,24 @@ static int imx290_set_vmax(struct imx290 *imx290, u32 val)
 	if (ret)
 		dev_err(imx290->dev, "Unable to write vmax\n");
 
+	/*
+	 * Changing vblank changes the allowed range for exposure.
+	 * We don't supply the current exposure as default here as it
+	 * may lie outside the new range. We will reset it just below.
+	 */
+	__v4l2_ctrl_modify_range(imx290->exposure,
+				 IMX290_EXPOSURE_MIN,
+				 vmax - 2,
+				 IMX290_EXPOSURE_STEP,
+				 vmax - 2);
+
+	/*
+	 * Becuse of the way exposure works for this sensor, updating
+	 * vblank causes the effective exposure to change, so we must
+	 * set it back to the "new" correct value.
+	 */
+	imx290_set_exposure(imx290, imx290->exposure->val);
+
 	return ret;
 }
 
@@ -647,7 +665,7 @@ static int imx290_set_ctrl(struct v4l2_ctrl *ctrl)
 		return 0;
 
 	switch (ctrl->id) {
-	case V4L2_CID_GAIN:
+	case V4L2_CID_ANALOGUE_GAIN:
 		ret = imx290_set_gain(imx290, ctrl->val);
 		break;
 	case V4L2_CID_EXPOSURE:
@@ -855,10 +873,10 @@ static int imx290_set_fmt(struct v4l2_subdev *sd,
 		}
 		if (imx290->exposure)
 			__v4l2_ctrl_modify_range(imx290->exposure,
-						 mode->vmax - mode->height,
-						 mode->vmax - 4,
+						 IMX290_EXPOSURE_MIN,
+						 mode->vmax - 2,
 						 IMX290_EXPOSURE_STEP,
-						 mode->vmax - 4);
+						 mode->vmax - 2);
 	}
 
 	*format = fmt->format;
@@ -1328,10 +1346,10 @@ static int imx290_probe(struct i2c_client *client)
 	 */
 	imx290_entity_init_cfg(&imx290->sd, NULL);
 
-	v4l2_ctrl_handler_init(&imx290->ctrls, 4);
+	v4l2_ctrl_handler_init(&imx290->ctrls, 9);
 
 	v4l2_ctrl_new_std(&imx290->ctrls, &imx290_ctrl_ops,
-			  V4L2_CID_GAIN, 0, 238, 1, 0);
+			  V4L2_CID_ANALOGUE_GAIN, 0, 100, 1, 0);
 
 	mode = imx290->current_mode;
 	imx290->hblank = v4l2_ctrl_new_std(&imx290->ctrls, &imx290_ctrl_ops,
@@ -1349,9 +1367,9 @@ static int imx290_probe(struct i2c_client *client)
 	imx290->exposure = v4l2_ctrl_new_std(&imx290->ctrls, &imx290_ctrl_ops,
 					     V4L2_CID_EXPOSURE,
 					     IMX290_EXPOSURE_MIN,
-					     mode->vmax - 4,
+					     mode->vmax - 2,
 					     IMX290_EXPOSURE_STEP,
-					     mode->vmax - 4);
+					     mode->vmax - 2);
 
 	imx290->hflip = v4l2_ctrl_new_std(&imx290->ctrls, &imx290_ctrl_ops,
 					  V4L2_CID_HFLIP, 0, 1, 1, 0);

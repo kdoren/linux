@@ -24,6 +24,7 @@
 		emmc2bus = &emmc2bus;
 		ethernet0 = &genet;
 		pcie0 = &pcie0;
+		blconfig = &blconfig;
 	};
 
 	leds {
@@ -215,6 +216,22 @@
 	status = "okay";
 };
 
+&rmem {
+	/*
+	 * RPi4's co-processor will copy the board's bootloader configuration
+	 * into memory for the OS to consume. It'll also update this node with
+	 * its placement information.
+	 */
+	blconfig: nvram@0 {
+		compatible = "raspberrypi,bootloader-config", "nvmem-rmem";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		reg = <0x0 0x0 0x0>;
+		no-map;
+		status = "disabled";
+	};
+};
+
 /* SDHCI is used to control the SDIO for wireless */
 &sdhci {
 	#address-cells = <1>;
@@ -319,6 +336,7 @@
 #include "bcm2711-rpi.dtsi"
 #include "bcm283x-rpi-csi1-2lane.dtsi"
 #include "bcm283x-rpi-i2c0mux_0_44.dtsi"
+#include "bcm283x-rpi-cam1-regulator.dtsi"
 
 / {
 	chosen {
@@ -583,6 +601,10 @@
 &audio {
 	pinctrl-names = "default";
 	pinctrl-0 = <&audio_pins>;
+};
+
+&cam1_reg {
+	gpio = <&expgpio 5 GPIO_ACTIVE_HIGH>;
 };
 
 / {

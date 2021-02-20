@@ -15,7 +15,6 @@ enum vc4_hdmi_regs {
 	VC5_PHY,
 	VC5_RAM,
 	VC5_RM,
-	VC5_INTR2,
 };
 
 enum vc4_hdmi_field {
@@ -25,12 +24,12 @@ enum vc4_hdmi_field {
 	HDMI_CEC_CNTRL_3,
 	HDMI_CEC_CNTRL_4,
 	HDMI_CEC_CNTRL_5,
+	HDMI_CEC_CPU_CLEAR,
+	HDMI_CEC_CPU_MASK_CLEAR,
+	HDMI_CEC_CPU_MASK_SET,
+	HDMI_CEC_CPU_MASK_STATUS,
 	HDMI_CEC_CPU_STATUS,
 	HDMI_CEC_CPU_SET,
-	HDMI_CEC_CPU_CLEAR,
-	HDMI_CEC_CPU_MASK_STATUS,
-	HDMI_CEC_CPU_MASK_SET,
-	HDMI_CEC_CPU_MASK_CLEAR,
 
 	/*
 	 * Transmit data, first byte is low byte of the 32-bit reg.
@@ -61,9 +60,12 @@ enum vc4_hdmi_field {
 	 */
 	HDMI_CTS_0,
 	HDMI_CTS_1,
+	HDMI_DEEP_COLOR_CONFIG_1,
 	HDMI_DVP_CTL,
 	HDMI_FIFO_CTL,
 	HDMI_FRAME_COUNT,
+	HDMI_GCP_CONFIG,
+	HDMI_GCP_WORD_1,
 	HDMI_HORZA,
 	HDMI_HORZB,
 	HDMI_HOTPLUG,
@@ -140,7 +142,6 @@ struct vc4_hdmi_register {
 #define VC5_CEC_REG(reg, offset)	_VC4_REG(VC5_CEC, reg, offset)
 #define VC5_CSC_REG(reg, offset)	_VC4_REG(VC5_CSC, reg, offset)
 #define VC5_DVP_REG(reg, offset)	_VC4_REG(VC5_DVP, reg, offset)
-#define VC5_INTR2_REG(reg, offset)	_VC4_REG(VC5_INTR2, reg, offset)
 #define VC5_PHY_REG(reg, offset)	_VC4_REG(VC5_PHY, reg, offset)
 #define VC5_RAM_REG(reg, offset)	_VC4_REG(VC5_RAM, reg, offset)
 #define VC5_RM_REG(reg, offset)		_VC4_REG(VC5_RM, reg, offset)
@@ -233,6 +234,9 @@ static const struct vc4_hdmi_register vc5_hdmi_hdmi0_fields[] = {
 	VC4_HDMI_REG(HDMI_VERTB1, 0x0f8),
 	VC4_HDMI_REG(HDMI_MAI_CHANNEL_MAP, 0x09c),
 	VC4_HDMI_REG(HDMI_MAI_CONFIG, 0x0a0),
+	VC4_HDMI_REG(HDMI_DEEP_COLOR_CONFIG_1, 0x170),
+	VC4_HDMI_REG(HDMI_GCP_CONFIG, 0x178),
+	VC4_HDMI_REG(HDMI_GCP_WORD_1, 0x17c),
 	VC4_HDMI_REG(HDMI_HOTPLUG, 0x1a8),
 
 	VC5_DVP_REG(HDMI_CLOCK_STOP, 0x0bc),
@@ -273,12 +277,6 @@ static const struct vc4_hdmi_register vc5_hdmi_hdmi0_fields[] = {
 	VC5_CEC_REG(HDMI_CEC_RX_DATA_2, 0x03c),
 	VC5_CEC_REG(HDMI_CEC_RX_DATA_3, 0x040),
 	VC5_CEC_REG(HDMI_CEC_RX_DATA_4, 0x044),
-	VC5_INTR2_REG(HDMI_CEC_CPU_STATUS, 0x0000),
-	VC5_INTR2_REG(HDMI_CEC_CPU_SET, 0x0004),
-	VC5_INTR2_REG(HDMI_CEC_CPU_CLEAR, 0x0008),
-	VC5_INTR2_REG(HDMI_CEC_CPU_MASK_STATUS, 0x000c),
-	VC5_INTR2_REG(HDMI_CEC_CPU_MASK_SET, 0x0010),
-	VC5_INTR2_REG(HDMI_CEC_CPU_MASK_CLEAR, 0x0014),
 
 	VC5_CSC_REG(HDMI_CSC_CTL, 0x000),
 	VC5_CSC_REG(HDMI_CSC_12_11, 0x004),
@@ -315,6 +313,9 @@ static const struct vc4_hdmi_register vc5_hdmi_hdmi1_fields[] = {
 	VC4_HDMI_REG(HDMI_VERTB1, 0x0f8),
 	VC4_HDMI_REG(HDMI_MAI_CHANNEL_MAP, 0x09c),
 	VC4_HDMI_REG(HDMI_MAI_CONFIG, 0x0a0),
+	VC4_HDMI_REG(HDMI_DEEP_COLOR_CONFIG_1, 0x170),
+	VC4_HDMI_REG(HDMI_GCP_CONFIG, 0x178),
+	VC4_HDMI_REG(HDMI_GCP_WORD_1, 0x17c),
 	VC4_HDMI_REG(HDMI_HOTPLUG, 0x1a8),
 
 	VC5_DVP_REG(HDMI_CLOCK_STOP, 0x0bc),
@@ -355,12 +356,6 @@ static const struct vc4_hdmi_register vc5_hdmi_hdmi1_fields[] = {
 	VC5_CEC_REG(HDMI_CEC_RX_DATA_2, 0x03c),
 	VC5_CEC_REG(HDMI_CEC_RX_DATA_3, 0x040),
 	VC5_CEC_REG(HDMI_CEC_RX_DATA_4, 0x044),
-	VC5_INTR2_REG(HDMI_CEC_CPU_STATUS, 0x0000),
-	VC5_INTR2_REG(HDMI_CEC_CPU_SET, 0x0004),
-	VC5_INTR2_REG(HDMI_CEC_CPU_CLEAR, 0x0008),
-	VC5_INTR2_REG(HDMI_CEC_CPU_MASK_STATUS, 0x000c),
-	VC5_INTR2_REG(HDMI_CEC_CPU_MASK_SET, 0x0010),
-	VC5_INTR2_REG(HDMI_CEC_CPU_MASK_CLEAR, 0x0014),
 
 	VC5_CSC_REG(HDMI_CSC_CTL, 0x000),
 	VC5_CSC_REG(HDMI_CSC_12_11, 0x004),
@@ -390,9 +385,6 @@ void __iomem *__vc4_hdmi_get_field_base(struct vc4_hdmi *hdmi,
 
 	case VC5_DVP:
 		return hdmi->dvp_regs;
-
-	case VC5_INTR2:
-		return hdmi->intr2_regs;
 
 	case VC5_PHY:
 		return hdmi->phy_regs;

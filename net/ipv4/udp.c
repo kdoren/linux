@@ -2173,7 +2173,7 @@ static int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		__skb_pull(skb, skb_transport_offset(skb));
 		ret = udp_queue_rcv_one_skb(sk, skb);
 		if (ret > 0)
-			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, -ret);
+			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, ret);
 	}
 	return 0;
 }
@@ -2553,7 +2553,8 @@ int udp_v4_early_demux(struct sk_buff *skb)
 		 */
 		if (!inet_sk(sk)->inet_daddr && in_dev)
 			return ip_mc_validate_source(skb, iph->daddr,
-						     iph->saddr, iph->tos,
+						     iph->saddr,
+						     iph->tos & IPTOS_RT_MASK,
 						     skb->dev, in_dev, &itag);
 	}
 	return 0;

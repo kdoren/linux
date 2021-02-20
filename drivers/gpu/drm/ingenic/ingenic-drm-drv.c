@@ -195,22 +195,27 @@ static void ingenic_drm_crtc_update_timings(struct ingenic_drm *priv,
 }
 
 static int ingenic_drm_crtc_atomic_check(struct drm_crtc *crtc,
-					 struct drm_crtc_state *state)
+					 struct drm_atomic_state *state)
 {
+	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
+									  crtc);
 	struct ingenic_drm *priv = drm_crtc_get_priv(crtc);
 	struct drm_plane_state *f1_state, *f0_state, *ipu_state = NULL;
 
-	if (drm_atomic_crtc_needs_modeset(state) && priv->soc_info->has_osd) {
-		f1_state = drm_atomic_get_plane_state(state->state, &priv->f1);
+	if (drm_atomic_crtc_needs_modeset(crtc_state) && priv->soc_info->has_osd) {
+		f1_state = drm_atomic_get_plane_state(crtc_state->state,
+						      &priv->f1);
 		if (IS_ERR(f1_state))
 			return PTR_ERR(f1_state);
 
-		f0_state = drm_atomic_get_plane_state(state->state, &priv->f0);
+		f0_state = drm_atomic_get_plane_state(crtc_state->state,
+						      &priv->f0);
 		if (IS_ERR(f0_state))
 			return PTR_ERR(f0_state);
 
 		if (IS_ENABLED(CONFIG_DRM_INGENIC_IPU) && priv->ipu_plane) {
-			ipu_state = drm_atomic_get_plane_state(state->state, priv->ipu_plane);
+			ipu_state = drm_atomic_get_plane_state(crtc_state->state,
+							       priv->ipu_plane);
 			if (IS_ERR(ipu_state))
 				return PTR_ERR(ipu_state);
 
@@ -248,7 +253,7 @@ ingenic_drm_crtc_mode_valid(struct drm_crtc *crtc, const struct drm_display_mode
 }
 
 static void ingenic_drm_crtc_atomic_begin(struct drm_crtc *crtc,
-					  struct drm_crtc_state *oldstate)
+					  struct drm_atomic_state *state)
 {
 	struct ingenic_drm *priv = drm_crtc_get_priv(crtc);
 	u32 ctrl = 0;
@@ -268,20 +273,20 @@ static void ingenic_drm_crtc_atomic_begin(struct drm_crtc *crtc,
 }
 
 static void ingenic_drm_crtc_atomic_flush(struct drm_crtc *crtc,
-					  struct drm_crtc_state *oldstate)
+					  struct drm_atomic_state *state)
 {
 	struct ingenic_drm *priv = drm_crtc_get_priv(crtc);
-	struct drm_crtc_state *state = crtc->state;
-	struct drm_pending_vblank_event *event = state->event;
+	struct drm_crtc_state *crtc_state = crtc->state;
+	struct drm_pending_vblank_event *event = crtc_state->event;
 
-	if (drm_atomic_crtc_needs_modeset(state)) {
-		ingenic_drm_crtc_update_timings(priv, &state->mode);
+	if (drm_atomic_crtc_needs_modeset(crtc_state)) {
+		ingenic_drm_crtc_update_timings(priv, &crtc_state->mode);
 
 		clk_set_rate(priv->pix_clk, state->adjusted_mode.clock * 1000);
 	}
 
 	if (event) {
-		state->event = NULL;
+		crtc_state->event = NULL;
 
 		spin_lock_irq(&crtc->dev->event_lock);
 		if (drm_crtc_vblank_get(crtc) == 0)

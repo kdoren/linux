@@ -2471,8 +2471,13 @@ enum dc_status dc_link_validate_mode_timing(
 static struct abm *get_abm_from_stream_res(const struct dc_link *link)
 {
 	int i;
-	struct dc *dc = link->ctx->dc;
+	struct dc *dc = NULL;
 	struct abm *abm = NULL;
+
+	if (!link || !link->ctx)
+		return NULL;
+
+	dc = link->ctx->dc;
 
 	for (i = 0; i < MAX_PIPES; i++) {
 		struct pipe_ctx pipe_ctx = dc->current_state->res_ctx.pipe_ctx[i];
@@ -3394,10 +3399,13 @@ uint32_t dc_bandwidth_in_kbps_from_timing(
 {
 	uint32_t bits_per_channel = 0;
 	uint32_t kbps;
+	struct fixed31_32 link_bw_kbps;
 
 	if (timing->flags.DSC) {
-		kbps = (timing->pix_clk_100hz * timing->dsc_cfg.bits_per_pixel);
-		kbps = kbps / 160 + ((kbps % 160) ? 1 : 0);
+		link_bw_kbps = dc_fixpt_from_int(timing->pix_clk_100hz);
+		link_bw_kbps = dc_fixpt_div_int(link_bw_kbps, 160);
+		link_bw_kbps = dc_fixpt_mul_int(link_bw_kbps, timing->dsc_cfg.bits_per_pixel);
+		kbps = dc_fixpt_ceil(link_bw_kbps);
 		return kbps;
 	}
 

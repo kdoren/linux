@@ -107,9 +107,9 @@ EXPORT_SYMBOL(xsk_get_pool_from_qid);
 
 void xsk_clear_pool_at_qid(struct net_device *dev, u16 queue_id)
 {
-	if (queue_id < dev->real_num_rx_queues)
+	if (queue_id < dev->num_rx_queues)
 		dev->_rx[queue_id].pool = NULL;
-	if (queue_id < dev->real_num_tx_queues)
+	if (queue_id < dev->num_tx_queues)
 		dev->_tx[queue_id].pool = NULL;
 }
 
@@ -211,6 +211,14 @@ static int __xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len,
 	return 0;
 }
 
+static bool xsk_tx_writeable(struct xdp_sock *xs)
+{
+	if (xskq_cons_present_entries(xs->tx) > xs->tx->nentries / 2)
+		return false;
+
+	return true;
+}
+
 static bool xsk_is_bound(struct xdp_sock *xs)
 {
 	if (READ_ONCE(xs->state) == XSK_BOUND) {
@@ -296,7 +304,8 @@ void xsk_tx_release(struct xsk_buff_pool *pool)
 	rcu_read_lock();
 	list_for_each_entry_rcu(xs, &pool->xsk_tx_list, tx_list) {
 		__xskq_cons_release(xs->tx);
-		xs->sk.sk_write_space(&xs->sk);
+		if (xsk_tx_writeable(xs))
+			xs->sk.sk_write_space(&xs->sk);
 	}
 	rcu_read_unlock();
 }
@@ -355,9 +364,9 @@ static void xsk_destruct_skb(struct sk_buff *skb)
 	struct xdp_sock *xs = xdp_sk(skb->sk);
 	unsigned long flags;
 
-	spin_lock_irqsave(&xs->tx_completion_lock, flags);
+	spin_lock_irqsave(&xs->pool->cq_lock, flags);
 	xskq_prod_submit_addr(xs->pool->cq, addr);
-	spin_unlock_irqrestore(&xs->tx_completion_lock, flags);
+	spin_unlock_irqrestore(&xs->pool->cq_lock, flags);
 
 	sock_wfree(skb);
 }
@@ -369,6 +378,7 @@ static int xsk_generic_xmit(struct sock *sk)
 	bool sent_frame = false;
 	struct xdp_desc desc;
 	struct sk_buff *skb;
+	unsigned long flags;
 	int err = 0;
 
 	mutex_lock(&xs->mutex);
@@ -400,10 +410,13 @@ static int xsk_generic_xmit(struct sock *sk)
 		 * if there is space in it. This avoids having to implement
 		 * any buffering in the Tx path.
 		 */
+		spin_lock_irqsave(&xs->pool->cq_lock, flags);
 		if (unlikely(err) || xskq_prod_reserve(xs->pool->cq)) {
+			spin_unlock_irqrestore(&xs->pool->cq_lock, flags);
 			kfree_skb(skb);
 			goto out;
 		}
+		spin_unlock_irqrestore(&xs->pool->cq_lock, flags);
 
 		skb->dev = xs->dev;
 		skb->priority = sk->sk_priority;
@@ -415,6 +428,9 @@ static int xsk_generic_xmit(struct sock *sk)
 		if  (err == NETDEV_TX_BUSY) {
 			/* Tell user-space to retry the send */
 			skb->destructor = sock_wfree;
+			spin_lock_irqsave(&xs->pool->cq_lock, flags);
+			xskq_prod_cancel(xs->pool->cq);
+			spin_unlock_irqrestore(&xs->pool->cq_lock, flags);
 			/* Free skb without triggering the perf drop trace */
 			consume_skb(skb);
 			err = -EAGAIN;
@@ -436,7 +452,8 @@ static int xsk_generic_xmit(struct sock *sk)
 
 out:
 	if (sent_frame)
-		sk->sk_write_space(sk);
+		if (xsk_tx_writeable(xs))
+			sk->sk_write_space(sk);
 
 	mutex_unlock(&xs->mutex);
 	return err;
@@ -471,10 +488,12 @@ static int xsk_sendmsg(struct socket *sock, struct msghdr *m, size_t total_len)
 static __poll_t xsk_poll(struct file *file, struct socket *sock,
 			     struct poll_table_struct *wait)
 {
-	__poll_t mask = datagram_poll(file, sock, wait);
+	__poll_t mask = 0;
 	struct sock *sk = sock->sk;
 	struct xdp_sock *xs = xdp_sk(sk);
 	struct xsk_buff_pool *pool;
+
+	sock_poll_wait(file, sock, wait);
 
 	if (unlikely(!xsk_is_bound(xs)))
 		return mask;
@@ -491,7 +510,7 @@ static __poll_t xsk_poll(struct file *file, struct socket *sock,
 
 	if (xs->rx && !xskq_prod_is_empty(xs->rx))
 		mask |= EPOLLIN | EPOLLRDNORM;
-	if (xs->tx && !xskq_cons_is_full(xs->tx))
+	if (xs->tx && xsk_tx_writeable(xs))
 		mask |= EPOLLOUT | EPOLLWRNORM;
 
 	return mask;
@@ -759,6 +778,10 @@ static int xsk_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 			goto out_unlock;
 		}
 	}
+
+	/* FQ and CQ are now owned by the buffer pool and cleaned up with it. */
+	xs->fq_tmp = NULL;
+	xs->cq_tmp = NULL;
 
 	xs->dev = dev;
 	xs->zc = xs->umem->zc;
@@ -1181,7 +1204,6 @@ static int xsk_create(struct net *net, struct socket *sock, int protocol,
 	xs->state = XSK_READY;
 	mutex_init(&xs->mutex);
 	spin_lock_init(&xs->rx_lock);
-	spin_lock_init(&xs->tx_completion_lock);
 
 	INIT_LIST_HEAD(&xs->map_list);
 	spin_lock_init(&xs->map_list_lock);

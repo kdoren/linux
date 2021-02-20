@@ -1058,9 +1058,6 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
 		goto error;
 	}
 
-	/* Update the actual used number of crtc */
-	adev->mode_info.num_crtc = adev->dm.display_indexes_num;
-
 	/* create fake encoders for MST */
 	dm_dp_create_fake_mst_encoders(adev);
 
@@ -2281,8 +2278,6 @@ void amdgpu_dm_update_connector_after_detect(
 
 			drm_connector_update_edid_property(connector,
 							   aconnector->edid);
-			drm_add_edid_modes(connector, aconnector->edid);
-
 			if (aconnector->dc_link->aux_mode)
 				drm_dp_cec_set_edid(&aconnector->dm_dp_aux.aux,
 						    aconnector->edid);
@@ -3251,6 +3246,10 @@ static int amdgpu_dm_initialize_drm_device(struct amdgpu_device *adev)
 	enum dc_connection_type new_connection_type = dc_connection_none;
 	const struct dc_plane_cap *plane;
 
+	dm->display_indexes_num = dm->dc->caps.max_streams;
+	/* Update the actual used number of crtc */
+	adev->mode_info.num_crtc = adev->dm.display_indexes_num;
+
 	link_cnt = dm->dc->caps.max_links;
 	if (amdgpu_dm_mode_config_init(dm->adev)) {
 		DRM_ERROR("DM: Failed to initialize mode config\n");
@@ -3311,8 +3310,6 @@ static int amdgpu_dm_initialize_drm_device(struct amdgpu_device *adev)
 			DRM_ERROR("KMS: Failed to initialize crtc\n");
 			goto fail;
 		}
-
-	dm->display_indexes_num = dm->dc->caps.max_streams;
 
 	/* loops over all connectors on the board */
 	for (i = 0; i < link_cnt; i++) {
@@ -5520,17 +5517,19 @@ static void dm_update_crtc_active_planes(struct drm_crtc *crtc,
 }
 
 static int dm_crtc_helper_atomic_check(struct drm_crtc *crtc,
-				       struct drm_crtc_state *state)
+				       struct drm_atomic_state *state)
 {
+	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
+									  crtc);
 	struct amdgpu_device *adev = drm_to_adev(crtc->dev);
 	struct dc *dc = adev->dm.dc;
-	struct dm_crtc_state *dm_crtc_state = to_dm_crtc_state(state);
+	struct dm_crtc_state *dm_crtc_state = to_dm_crtc_state(crtc_state);
 	int ret = -EINVAL;
 
-	dm_update_crtc_active_planes(crtc, state);
+	dm_update_crtc_active_planes(crtc, crtc_state);
 
 	if (unlikely(!dm_crtc_state->stream &&
-		     modeset_required(state, NULL, dm_crtc_state->stream))) {
+		     modeset_required(crtc_state, NULL, dm_crtc_state->stream))) {
 		WARN_ON(1);
 		return ret;
 	}
@@ -5541,8 +5540,8 @@ static int dm_crtc_helper_atomic_check(struct drm_crtc *crtc,
 	 * planes are disabled, which is not supported by the hardware. And there is legacy
 	 * userspace which stops using the HW cursor altogether in response to the resulting EINVAL.
 	 */
-	if (state->enable &&
-	    !(state->plane_mask & drm_plane_mask(crtc->primary)))
+	if (crtc_state->enable &&
+	    !(crtc_state->plane_mask & drm_plane_mask(crtc->primary)))
 		return -EINVAL;
 
 	/* In some use cases, like reset, no stream is attached */
