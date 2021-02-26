@@ -770,7 +770,7 @@ static const struct imx477_reg mode_2028x1080_regs[] = {
 };
 
 /* 4x4 binned. 120fps */
-static const struct imx477_reg mode_1012x760_regs[] = {
+static const struct imx477_reg mode_1332x990_regs[] = {
 	{0x420b, 0x01},
 	{0x990c, 0x00},
 	{0x990d, 0x08},
@@ -786,28 +786,31 @@ static const struct imx477_reg mode_1012x760_regs[] = {
 	{0x0112, 0x0a},
 	{0x0113, 0x0a},
 	{0x0114, 0x01},
-	{0x0342, 0x14},
-	{0x0343, 0x60},
+	{0x0342, 0x1a},
+	{0x0343, 0x08},
+	{0x0340, 0x04},
+	{0x0341, 0x1a},
 	{0x0344, 0x00},
 	{0x0345, 0x00},
-	{0x0346, 0x00},
-	{0x0347, 0x00},
+	{0x0346, 0x02},
+	{0x0347, 0x10},
 	{0x0348, 0x0f},
-	{0x0349, 0xd3},
-	{0x034a, 0x0b},
-	{0x034b, 0xdf},
+	{0x0349, 0xd7},
+	{0x034a, 0x09},
+	{0x034b, 0xcf},
 	{0x00e3, 0x00},
 	{0x00e4, 0x00},
 	{0x00fc, 0x0a},
 	{0x00fd, 0x0a},
 	{0x00fe, 0x0a},
 	{0x00ff, 0x0a},
+	{0xe013, 0x00},
 	{0x0220, 0x00},
 	{0x0221, 0x11},
 	{0x0381, 0x01},
 	{0x0383, 0x01},
 	{0x0385, 0x01},
-	{0x0387, 0x03},
+	{0x0387, 0x01},
 	{0x0900, 0x01},
 	{0x0901, 0x22},
 	{0x0902, 0x02},
@@ -831,29 +834,29 @@ static const struct imx477_reg mode_1012x760_regs[] = {
 	{0x936d, 0x5f},
 	{0x9304, 0x03},
 	{0x9305, 0x80},
-	{0x9e9a, 0x3f},
-	{0x9e9b, 0x3f},
-	{0x9e9c, 0x3f},
-	{0x9e9d, 0x27},
-	{0x9e9e, 0x27},
-	{0x9e9f, 0x27},
+	{0x9e9a, 0x2f},
+	{0x9e9b, 0x2f},
+	{0x9e9c, 0x2f},
+	{0x9e9d, 0x00},
+	{0x9e9e, 0x00},
+	{0x9e9f, 0x00},
 	{0xa2a9, 0x27},
 	{0xa2b7, 0x03},
-	{0x0401, 0x01},
+	{0x0401, 0x00},
 	{0x0404, 0x00},
-	{0x0405, 0x20},
-	{0x0408, 0x00},
-	{0x0409, 0x00},
+	{0x0405, 0x10},
+	{0x0408, 0x01},
+	{0x0409, 0x5c},
 	{0x040a, 0x00},
 	{0x040b, 0x00},
-	{0x040c, 0x07},
-	{0x040d, 0xea},
-	{0x040e, 0x02},
-	{0x040f, 0xf8},
-	{0x034c, 0x03},
-	{0x034d, 0xf4},
-	{0x034e, 0x02},
-	{0x034f, 0xf8},
+	{0x040c, 0x05},
+	{0x040d, 0x34},
+	{0x040e, 0x03},
+	{0x040f, 0xde},
+	{0x034c, 0x05},
+	{0x034d, 0x34},
+	{0x034e, 0x03},
+	{0x034f, 0xde},
 	{0x0301, 0x05},
 	{0x0303, 0x02},
 	{0x0305, 0x02},
@@ -870,21 +873,21 @@ static const struct imx477_reg mode_1012x760_regs[] = {
 	{0x0822, 0x00},
 	{0x0823, 0x00},
 	{0x080a, 0x00},
-	{0x080b, 0x6f},
+	{0x080b, 0x7f},
 	{0x080c, 0x00},
-	{0x080d, 0x3f},
+	{0x080d, 0x4f},
 	{0x080e, 0x00},
-	{0x080f, 0xff},
+	{0x080f, 0x77},
 	{0x0810, 0x00},
-	{0x0811, 0x4f},
+	{0x0811, 0x5f},
 	{0x0812, 0x00},
-	{0x0813, 0x47},
+	{0x0813, 0x57},
 	{0x0814, 0x00},
-	{0x0815, 0x37},
-	{0x0816, 0x00},
-	{0x0817, 0xe7},
+	{0x0815, 0x4f},
+	{0x0816, 0x01},
+	{0x0817, 0x27},
 	{0x0818, 0x00},
-	{0x0819, 0x2f},
+	{0x0819, 0x3f},
 	{0xe04c, 0x00},
 	{0xe04d, 0x5f},
 	{0xe04e, 0x00},
@@ -893,7 +896,7 @@ static const struct imx477_reg mode_1012x760_regs[] = {
 	{0x3e37, 0x00},
 	{0x3f50, 0x00},
 	{0x3f56, 0x00},
-	{0x3f57, 0x96},
+	{0x3f57, 0xbf},
 };
 
 /* Mode configs */
@@ -955,7 +958,7 @@ static const struct imx477_mode supported_modes_12bit[] = {
 			.left = IMX477_PIXEL_ARRAY_LEFT,
 			.top = IMX477_PIXEL_ARRAY_TOP + 440,
 			.width = 4056,
-			.height = 2600,
+			.height = 2160,
 		},
 		.timeperframe_min = {
 			.numerator = 100,
@@ -974,9 +977,9 @@ static const struct imx477_mode supported_modes_12bit[] = {
 
 static const struct imx477_mode supported_modes_10bit[] = {
 	{
-		/* 720P 120fps. 4x4 binned */
-		.width = 1012,
-		.height = 760,
+		/* 120fps. 2x2 binned and cropped */
+		.width = 1332,
+		.height = 990,
 		.line_length_pix = 0x1460,
 		.crop = {
 			/*
@@ -987,10 +990,10 @@ static const struct imx477_mode supported_modes_10bit[] = {
 			 * rectangle once the driver is expanded to represent
 			 * its processing blocks with multiple subdevs.
 			 */
-			.left = IMX477_PIXEL_ARRAY_LEFT + 4,
-			.top = IMX477_PIXEL_ARRAY_TOP,
-			.width = 4052,
-			.height = 3040,
+			.left = IMX477_PIXEL_ARRAY_LEFT + 696,
+			.top = IMX477_PIXEL_ARRAY_TOP + 528,
+			.width = 2664,
+			.height = 1980,
 		},
 		.timeperframe_min = {
 			.numerator = 100,
@@ -998,11 +1001,11 @@ static const struct imx477_mode supported_modes_10bit[] = {
 		},
 		.timeperframe_default = {
 			.numerator = 100,
-			.denominator = 60000
+			.denominator = 12000
 		},
 		.reg_list = {
-			.num_of_regs = ARRAY_SIZE(mode_1012x760_regs),
-			.regs = mode_1012x760_regs,
+			.num_of_regs = ARRAY_SIZE(mode_1332x990_regs),
+			.regs = mode_1332x990_regs,
 		}
 	}
 };
@@ -1070,7 +1073,7 @@ struct imx477 {
 	struct v4l2_subdev sd;
 	struct media_pad pad[NUM_PADS];
 
-	struct v4l2_mbus_framefmt fmt;
+	unsigned int fmt_code;
 
 	struct clk *xclk;
 	u32 xclk_freq;
@@ -1232,21 +1235,9 @@ static u32 imx477_get_format_code(struct imx477 *imx477, u32 code)
 
 static void imx477_set_default_format(struct imx477 *imx477)
 {
-	struct v4l2_mbus_framefmt *fmt = &imx477->fmt;
-
 	/* Set default mode to max resolution */
 	imx477->mode = &supported_modes_12bit[0];
-
-	fmt->code = MEDIA_BUS_FMT_SRGGB12_1X12;
-	fmt->colorspace = V4L2_COLORSPACE_SRGB;
-	fmt->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(fmt->colorspace);
-	fmt->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(true,
-							  fmt->colorspace,
-							  fmt->ycbcr_enc);
-	fmt->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(fmt->colorspace);
-	fmt->width = imx477->mode->width;
-	fmt->height = imx477->mode->height;
-	fmt->field = V4L2_FIELD_NONE;
+	imx477->fmt_code = MEDIA_BUS_FMT_SRGGB12_1X12;
 }
 
 static int imx477_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
@@ -1285,8 +1276,7 @@ static int imx477_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	return 0;
 }
 
-static void imx477_adjust_exposure_range(struct imx477 *imx477,
-					 struct v4l2_ctrl *ctrl)
+static void imx477_adjust_exposure_range(struct imx477 *imx477)
 {
 	int exposure_max, exposure_def;
 
@@ -1331,7 +1321,7 @@ static int imx477_set_ctrl(struct v4l2_ctrl *ctrl)
 	 * and adjust if necessary.
 	 */
 	if (ctrl->id == V4L2_CID_VBLANK)
-		imx477_adjust_exposure_range(imx477, ctrl);
+		imx477_adjust_exposure_range(imx477);
 
 	/*
 	 * Applying V4L2 control value only happens
@@ -1517,7 +1507,7 @@ static int imx477_get_pad_format(struct v4l2_subdev *sd,
 			imx477_update_image_pad_format(imx477, imx477->mode,
 						       fmt);
 			fmt->format.code =
-			       imx477_get_format_code(imx477, imx477->fmt.code);
+			       imx477_get_format_code(imx477, imx477->fmt_code);
 		} else {
 			imx477_update_metadata_pad_format(fmt);
 		}
@@ -1608,6 +1598,7 @@ static int imx477_set_pad_format(struct v4l2_subdev *sd,
 			*framefmt = fmt->format;
 		} else {
 			imx477->mode = mode;
+			imx477->fmt_code = fmt->format.code;
 			imx477_set_framing_limits(imx477);
 		}
 	} else {
