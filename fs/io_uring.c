@@ -5083,6 +5083,9 @@ static void __io_queue_proc(struct io_poll_iocb *poll, struct io_poll_table *pt,
 			pt->error = -EINVAL;
 			return;
 		}
+		/* double add on the same waitqueue head, ignore */
+		if (poll->head == head)
+			return;
 		poll = kmalloc(sizeof(*poll), GFP_ATOMIC);
 		if (!poll) {
 			pt->error = -ENOMEM;
@@ -8440,8 +8443,21 @@ static __poll_t io_uring_poll(struct file *file, poll_table *wait)
 	smp_rmb();
 	if (!io_sqring_full(ctx))
 		mask |= EPOLLOUT | EPOLLWRNORM;
-	io_cqring_overflow_flush(ctx, false, NULL, NULL);
-	if (io_cqring_events(ctx))
+
+	/*
+	 * Don't flush cqring overflow list here, just do a simple check.
+	 * Otherwise there could possible be ABBA deadlock:
+	 *      CPU0                    CPU1
+	 *      ----                    ----
+	 * lock(&ctx->uring_lock);
+	 *                              lock(&ep->mtx);
+	 *                              lock(&ctx->uring_lock);
+	 * lock(&ep->mtx);
+	 *
+	 * Users may get EPOLLIN meanwhile seeing nothing in cqring, this
+	 * pushs them to do the flush.
+	 */
+	if (io_cqring_events(ctx) || test_bit(0, &ctx->cq_check_overflow))
 		mask |= EPOLLIN | EPOLLRDNORM;
 
 	return mask;

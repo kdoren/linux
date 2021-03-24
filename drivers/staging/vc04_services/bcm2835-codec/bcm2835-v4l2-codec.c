@@ -576,7 +576,12 @@ static const struct bcm2835_codec_fmt supported_formats[] = {
 		.depth			= 0,
 		.flags			= V4L2_FMT_FLAG_COMPRESSED,
 		.mmal_fmt		= MMAL_ENCODING_VP8,
-	},
+	}, {
+		.fourcc			= V4L2_PIX_FMT_VC1_ANNEX_G,
+		.depth			= 0,
+		.flags			= V4L2_FMT_FLAG_COMPRESSED,
+		.mmal_fmt		= MMAL_ENCODING_WVC1,
+	}
 };
 
 struct bcm2835_codec_fmt_list {
@@ -602,6 +607,7 @@ struct bcm2835_codec_q_data {
 	unsigned int		crop_width;
 	unsigned int		crop_height;
 	bool			selection_set;
+	struct v4l2_fract	aspect_ratio;
 
 	unsigned int		sizeimage;
 	unsigned int		sequence;
@@ -980,6 +986,9 @@ static void handle_fmt_changed(struct bcm2835_codec_ctx *ctx,
 	q_data->sizeimage = format->buffer_size_min;
 	if (format->es.video.color_space)
 		color_mmal2v4l(ctx, format->es.video.color_space);
+
+	q_data->aspect_ratio.numerator = format->es.video.par.num;
+	q_data->aspect_ratio.denominator = format->es.video.par.den;
 
 	queue_res_chg_event(ctx);
 }
@@ -1513,6 +1522,14 @@ static int vidioc_g_selection(struct file *file, void *priv,
 			s->r.width = q_data->crop_width;
 			s->r.height = q_data->crop_height;
 			break;
+		case V4L2_SEL_TGT_CROP_BOUNDS:
+		case V4L2_SEL_TGT_CROP_DEFAULT:
+			s->r.left = 0;
+			s->r.top = 0;
+			s->r.width = (q_data->bytesperline << 3) /
+						q_data->fmt->depth;
+			s->r.height = q_data->height;
+			break;
 		default:
 			return -EINVAL;
 		}
@@ -1653,6 +1670,29 @@ static int vidioc_g_parm(struct file *file, void *priv,
 			ctx->framerate_num;
 	parm->parm.output.timeperframe.numerator =
 			ctx->framerate_denom;
+
+	return 0;
+}
+
+static int vidioc_g_pixelaspect(struct file *file, void *fh, int type,
+				struct v4l2_fract *f)
+{
+	struct bcm2835_codec_ctx *ctx = file2ctx(file);
+
+	/*
+	 * The selection API takes V4L2_BUF_TYPE_VIDEO_CAPTURE and
+	 * V4L2_BUF_TYPE_VIDEO_OUTPUT, even if the device implements the MPLANE
+	 * API. The V4L2 core will have converted the MPLANE variants to
+	 * non-MPLANE.
+	 * Open code this instead of using get_q_data in this case.
+	 */
+	if (ctx->dev->role != DECODE)
+		return -ENOIOCTLCMD;
+
+	if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		return -EINVAL;
+
+	*f = ctx->q_data[V4L2_M2M_DST].aspect_ratio;
 
 	return 0;
 }
@@ -2081,6 +2121,8 @@ static const struct v4l2_ioctl_ops bcm2835_codec_ioctl_ops = {
 
 	.vidioc_g_parm		= vidioc_g_parm,
 	.vidioc_s_parm		= vidioc_s_parm,
+
+	.vidioc_g_pixelaspect	= vidioc_g_pixelaspect,
 
 	.vidioc_subscribe_event = vidioc_subscribe_evt,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
@@ -2640,6 +2682,8 @@ static int bcm2835_codec_open(struct file *file)
 			      ctx->q_data[V4L2_M2M_DST].crop_width,
 			      ctx->q_data[V4L2_M2M_DST].height,
 			      ctx->q_data[V4L2_M2M_DST].fmt);
+	ctx->q_data[V4L2_M2M_DST].aspect_ratio.numerator = 1;
+	ctx->q_data[V4L2_M2M_DST].aspect_ratio.denominator = 1;
 
 	ctx->colorspace = V4L2_COLORSPACE_REC709;
 	ctx->bitrate = 10 * 1000 * 1000;
@@ -2837,7 +2881,7 @@ static int bcm2835_codec_get_supported_fmts(struct bcm2835_codec_dev *dev)
 	if (ret) {
 		if (ret == MMAL_MSG_STATUS_ENOSPC) {
 			v4l2_err(&dev->v4l2_dev,
-				 "%s: port has more encodings than we provided space for. Some are dropped (%u vs %u).\n",
+				 "%s: port has more encodings than we provided space for. Some are dropped (%zu vs %u).\n",
 				 __func__, param_size / sizeof(u32),
 				 MAX_SUPPORTED_ENCODINGS);
 			num_encodings = MAX_SUPPORTED_ENCODINGS;
@@ -2883,7 +2927,7 @@ static int bcm2835_codec_get_supported_fmts(struct bcm2835_codec_dev *dev)
 	if (ret) {
 		if (ret == MMAL_MSG_STATUS_ENOSPC) {
 			v4l2_err(&dev->v4l2_dev,
-				 "%s: port has more encodings than we provided space for. Some are dropped (%u vs %u).\n",
+				 "%s: port has more encodings than we provided space for. Some are dropped (%zu vs %u).\n",
 				 __func__, param_size / sizeof(u32),
 				 MAX_SUPPORTED_ENCODINGS);
 			num_encodings = MAX_SUPPORTED_ENCODINGS;

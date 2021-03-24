@@ -231,9 +231,37 @@
 		};
 	};
 
+	fragment@17 {
+		target = <&i2cbus>;
+		__dormant__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ds1340: ds1340@68 {
+				compatible = "dallas,ds1340";
+				trickle-resistor-ohms = <0>;
+				reg = <0x68>;
+			};
+		};
+	};
+
 	frag100: fragment@100 {
 		target = <&i2c_arm>;
 		i2cbus: __overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@101 {
+		target = <&i2c0if>;
+		__dormant__ {
+			status = "okay";
+		};
+	};
+
+	fragment@102 {
+		target = <&i2c0mux>;
+		__dormant__ {
 			status = "okay";
 		};
 	};
@@ -242,6 +270,7 @@
 		abx80x = <0>,"+0";
 		ds1307 = <0>,"+1";
 		ds1339 = <0>,"+2";
+		ds1340 = <0>,"+17";
 		ds3231 = <0>,"+3";
 		mcp7940x = <0>,"+4";
 		mcp7941x = <0>,"+5";
@@ -258,7 +287,8 @@
 		pcf85063a = <0>,"+16";
 
 		i2c0 = <&frag100>, "target:0=",<&i2c0>;
-		i2c_csi_dsi = <&frag100>, "target:0=",<&i2c_csi_dsi>;
+		i2c_csi_dsi = <&frag100>, "target:0=",<&i2c_csi_dsi>,
+			      <0>,"+101+102";
 
 		addr = <&abx80x>, "reg:0",
 		       <&ds1307>, "reg:0",
@@ -273,6 +303,7 @@
 		trickle-diode-type = <&abx80x>,"abracon,tc-diode",
 				     <&rv1805>,"abracon,tc-diode";
 		trickle-resistor-ohms = <&ds1339>,"trickle-resistor-ohms:0",
+					<&ds1340>,"trickle-resistor-ohms:0",
 					<&abx80x>,"abracon,tc-resistor:0",
 					<&rv3028>,"trickle-resistor-ohms:0",
 					<&rv1805>,"abracon,tc-resistor:0";
