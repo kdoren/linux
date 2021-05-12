@@ -644,10 +644,10 @@ static const u32 colorspace_coeffs[2][DRM_COLOR_ENCODING_MAX][3] = {
 			SCALER_CSC1_ITR_R_709_3,
 			SCALER_CSC2_ITR_R_709_3,
 		}, {
-			/* BT2020. Not supported yet - copy 601 */
-			SCALER_CSC0_ITR_R_601_5,
-			SCALER_CSC1_ITR_R_601_5,
-			SCALER_CSC2_ITR_R_601_5,
+			/* BT2020 */
+			SCALER_CSC0_ITR_R_2020,
+			SCALER_CSC1_ITR_R_2020,
+			SCALER_CSC2_ITR_R_2020,
 		}
 	}, {
 		/* Full range */
@@ -662,10 +662,10 @@ static const u32 colorspace_coeffs[2][DRM_COLOR_ENCODING_MAX][3] = {
 			SCALER_CSC1_ITR_R_709_3_FR,
 			SCALER_CSC2_ITR_R_709_3_FR,
 		}, {
-			/* BT2020. Not supported yet - copy JFIF */
-			SCALER_CSC0_JPEG_JFIF,
-			SCALER_CSC1_JPEG_JFIF,
-			SCALER_CSC2_JPEG_JFIF,
+			/* BT2020 */
+			SCALER_CSC0_ITR_R_2020_FR,
+			SCALER_CSC1_ITR_R_2020_FR,
+			SCALER_CSC2_ITR_R_2020_FR,
 		}
 	}
 };
@@ -825,8 +825,9 @@ static int vc4_plane_mode_set(struct drm_plane *plane,
 			 * and bits[3:0] should be between 0 and 11, indicating which
 			 * of the 12-pixels in that 128-bit word is the first pixel to be used
 			 */
-			u32 aligned = vc4_state->src_x / 12;
-			u32 last_bits = vc4_state->src_x % 12;
+	                u32 remaining_pixels = vc4_state->src_x % 96;
+			u32 aligned = remaining_pixels / 12;
+			u32 last_bits = remaining_pixels % 12;
 
 			x_off = aligned * 16 + last_bits;
 			hvs_format = HVS_PIXEL_FORMAT_YCBCR_10BIT;
@@ -1486,7 +1487,8 @@ struct drm_plane *vc4_plane_init(struct drm_device *dev,
 
 	drm_plane_create_color_properties(plane,
 					  BIT(DRM_COLOR_YCBCR_BT601) |
-					  BIT(DRM_COLOR_YCBCR_BT709),
+					  BIT(DRM_COLOR_YCBCR_BT709) |
+					  BIT(DRM_COLOR_YCBCR_BT2020),
 					  BIT(DRM_COLOR_YCBCR_LIMITED_RANGE) |
 					  BIT(DRM_COLOR_YCBCR_FULL_RANGE),
 					  DRM_COLOR_YCBCR_BT709,

@@ -47,6 +47,15 @@
 },
 
 {
+	/* A4Tech FHD 1080p webcam */
+	USB_DEVICE(0x09da, 0x2695),
+	.driver_info = (unsigned long) &(const struct snd_usb_audio_quirk) {
+		.ifnum = QUIRK_ANY_INTERFACE,
+		.type = QUIRK_SETUP_DISABLE_AUTOSUSPEND
+	}
+},
+
+{
 	/* Creative BT-D1 */
 	USB_DEVICE(0x041e, 0x0005),
 	.driver_info = (unsigned long) &(const struct snd_usb_audio_quirk) {
@@ -2371,6 +2380,16 @@ YAMAHA_DEVICE(0x7010, "UB99"),
 	.driver_info = (unsigned long) & (const struct snd_usb_audio_quirk) {
 		.vendor_name = "KORG, Inc.",
 		/* .product_name = "ToneLab ST", */
+		.ifnum = 3,
+		.type = QUIRK_MIDI_STANDARD_INTERFACE,
+	}
+},
+
+{
+	USB_DEVICE_VENDOR_SPEC(0x0944, 0x0204),
+	.driver_info = (unsigned long) & (const struct snd_usb_audio_quirk) {
+		.vendor_name = "KORG, Inc.",
+		/* .product_name = "ToneLab EX", */
 		.ifnum = 3,
 		.type = QUIRK_MIDI_STANDARD_INTERFACE,
 	}

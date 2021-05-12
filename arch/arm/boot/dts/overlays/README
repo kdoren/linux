@@ -987,8 +987,15 @@ Params: <None>
 
 
 Name:   gpio-poweroff
-Info:   Drives a GPIO high or low on poweroff (including halt). Enabling this
-        overlay will prevent the ability to boot by driving GPIO3 low.
+Info:   Drives a GPIO high or low on poweroff (including halt). Using this
+        overlay interferes with the normal power-down sequence, preventing the
+        kernel from resetting the SoC (a necessary step in a normal power-off
+        or reboot). This also disables the ability to trigger a boot by driving
+        GPIO3 low.
+
+        Users of this overlay are required to provide an external mechanism to
+        switch off the power supply when signalled - failure to do so results
+        in a kernel BUG, increased power consumption and undefined behaviour.
 Load:   dtoverlay=gpio-poweroff,<param>=<val>
 Params: gpiopin                 GPIO for signalling (default 26)
 
@@ -2018,6 +2025,17 @@ Load:   dtoverlay=midi-uart1
 Params: <None>
 
 
+Name:   minipitft13
+Info:   Overlay for AdaFruit Mini Pi 1.3" TFT via SPI using fbtft driver.
+Load:   dtoverlay=minipitft13,<param>=<val>
+Params: speed                   SPI bus speed (default 32000000)
+        rotate                  Display rotation (0, 90, 180 or 270; default 0)
+        width                   Display width (default 240)
+        height                  Display height (default 240)
+        fps                     Delay between frame updates (default 25)
+        debug                   Debug output level (0-7; default 0)
+
+
 Name:   miniuart-bt
 Info:   Switch the onboard Bluetooth function on Pi 3B, 3B+, 3A+, 4B and Zero W
         to use the mini-UART (ttyS0) and restore UART0/ttyAMA0 over GPIOs 14 &
@@ -2678,7 +2696,17 @@ Params: <None>
 Name:   spi-rtc
 Info:   Adds support for a number of SPI Real Time Clock devices
 Load:   dtoverlay=spi-rtc,<param>=<val>
-Params: pcf2123                 Select the PCF2123 device
+Params: ds3232                  Select the DS3232 device
+        ds3234                  Select the DS3234 device
+        pcf2123                 Select the PCF2123 device
+
+        spi0_0                  Use spi0.0 (default)
+        spi0_1                  Use spi0.1
+        spi1_0                  Use spi1.0
+        spi1_1                  Use spi1.1
+        spi2_0                  Use spi2.0
+        spi2_1                  Use spi2.1
+        cs_high                 This device requires an active-high CS
 
 
 Name:   spi0-1cs
@@ -3102,6 +3130,16 @@ Load:   dtoverlay=udrc,<param>=<val>
 Params: alsaname                Name of the ALSA audio device (default "udrc")
 
 
+Name:   ugreen-dabboard
+Info:   Configures the ugreen-dabboard I2S overlay
+        This is a simple overlay based on the simple-audio-card and the dmic
+        codec. It has the speciality that it is configured to use the codec
+        as a master I2S device. It works for example with the Si468x DAB
+        receiver on the uGreen DABBoard.
+Load:   dtoverlay=ugreen-dabboard,<param>=<val>
+Params: card-name               Override the default, "dabboard", card name.
+
+
 Name:   upstream
 Info:   Allow usage of downstream .dtb with upstream kernel. Comprises the
         vc4-kms-v3d and dwc2 overlays.
@@ -3144,6 +3182,27 @@ Info:   Enable the Raspberry Pi DSI 7" screen.
         Use edt-ft5406 for the touchscreen element.
         Requires vc4-kms-v3d to be loaded.
 Load:   dtoverlay=vc4-kms-dsi-7inch
+Params: <None>
+
+
+Name:   vc4-kms-dsi-lt070me05000
+Info:   Enable a JDI LT070ME05000 DSI display on DSI1.
+        Note that this is a 4 lane DSI device, so it will only work on a Compute
+        Module.
+        Requires vc4-kms-v3d to be loaded.
+Load:   dtoverlay=vc4-kms-dsi-lt070me05000,<param>
+Params: reset                   GPIO for the reset signal (default 17)
+        enable                  GPIO for the enable signal (default 4)
+        dcdc-en                 GPIO for the DC-DC converter enable (default 5)
+
+
+Name:   vc4-kms-dsi-lt070me05000-v2
+Info:   Enable a JDI LT070ME05000 DSI display on DSI1 using Harlab's V2
+        interface board.
+        Note that this is a 4 lane DSI device, so it will only work on a Compute
+        Module.
+        Requires vc4-kms-v3d to be loaded.
+Load:   dtoverlay=vc4-kms-dsi-lt070me05000-v2
 Params: <None>
 
 

@@ -930,23 +930,43 @@ static void send_eos_event(struct bcm2835_codec_ctx *ctx)
 	v4l2_event_queue_fh(&ctx->fh, &ev);
 }
 
-static void color_mmal2v4l(struct bcm2835_codec_ctx *ctx, u32 mmal_color_space)
+static void color_mmal2v4l(struct bcm2835_codec_ctx *ctx, u32 encoding,
+			   u32 color_space)
 {
-	switch (mmal_color_space) {
-	case MMAL_COLOR_SPACE_ITUR_BT601:
-		ctx->colorspace = V4L2_COLORSPACE_REC709;
-		ctx->xfer_func = V4L2_XFER_FUNC_709;
-		ctx->ycbcr_enc = V4L2_YCBCR_ENC_601;
-		ctx->quant = V4L2_QUANTIZATION_LIM_RANGE;
-		break;
+	int is_rgb;
 
-	case MMAL_COLOR_SPACE_ITUR_BT709:
-		ctx->colorspace = V4L2_COLORSPACE_REC709;
-		ctx->xfer_func = V4L2_XFER_FUNC_709;
-		ctx->ycbcr_enc = V4L2_YCBCR_ENC_709;
-		ctx->quant = V4L2_QUANTIZATION_LIM_RANGE;
+	switch (encoding) {
+	case MMAL_ENCODING_I420:
+	case MMAL_ENCODING_YV12:
+	case MMAL_ENCODING_NV12:
+	case MMAL_ENCODING_NV21:
+	case V4L2_PIX_FMT_YUYV:
+	case V4L2_PIX_FMT_YVYU:
+	case V4L2_PIX_FMT_UYVY:
+	case V4L2_PIX_FMT_VYUY:
+		/* YUV based colourspaces */
+		switch (color_space) {
+		case MMAL_COLOR_SPACE_ITUR_BT601:
+			ctx->colorspace = V4L2_COLORSPACE_SMPTE170M;
+			break;
+
+		case MMAL_COLOR_SPACE_ITUR_BT709:
+			ctx->colorspace = V4L2_COLORSPACE_REC709;
+			break;
+		default:
+			break;
+		}
+		break;
+	default:
+		/* RGB based colourspaces */
+		ctx->colorspace = V4L2_COLORSPACE_SRGB;
 		break;
 	}
+	ctx->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(ctx->colorspace);
+	ctx->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(ctx->colorspace);
+	is_rgb = ctx->colorspace == V4L2_COLORSPACE_SRGB;
+	ctx->quant = V4L2_MAP_QUANTIZATION_DEFAULT(is_rgb, ctx->colorspace,
+						   ctx->ycbcr_enc);
 }
 
 static void handle_fmt_changed(struct bcm2835_codec_ctx *ctx,
@@ -979,13 +999,21 @@ static void handle_fmt_changed(struct bcm2835_codec_ctx *ctx,
 
 	q_data->crop_width = format->es.video.crop.width;
 	q_data->crop_height = format->es.video.crop.height;
+	/*
+	 * Stop S_FMT updating crop_height should it be unaligned.
+	 * Client can still update the crop region via S_SELECTION should it
+	 * really want to, but the decoder is likely to complain that the
+	 * format then doesn't match.
+	 */
+	q_data->selection_set = true;
 	q_data->bytesperline = get_bytesperline(format->es.video.width,
 						q_data->fmt);
 
 	q_data->height = format->es.video.height;
 	q_data->sizeimage = format->buffer_size_min;
 	if (format->es.video.color_space)
-		color_mmal2v4l(ctx, format->es.video.color_space);
+		color_mmal2v4l(ctx, format->format.encoding,
+			       format->es.video.color_space);
 
 	q_data->aspect_ratio.numerator = format->es.video.par.num;
 	q_data->aspect_ratio.denominator = format->es.video.par.den;
@@ -998,6 +1026,7 @@ static void op_buffer_cb(struct vchiq_mmal_instance *instance,
 			 struct mmal_buffer *mmal_buf)
 {
 	struct bcm2835_codec_ctx *ctx = port->cb_ctx;
+	enum vb2_buffer_state buf_state = VB2_BUF_STATE_DONE;
 	struct m2m_mmal_buffer *buf;
 	struct vb2_v4l2_buffer *vb2;
 
@@ -1054,6 +1083,9 @@ static void op_buffer_cb(struct vchiq_mmal_instance *instance,
 		vb2->flags |= V4L2_BUF_FLAG_LAST;
 	}
 
+	if (mmal_buf->mmal_flags & MMAL_BUFFER_HEADER_FLAG_CORRUPTED)
+		buf_state = VB2_BUF_STATE_ERROR;
+
 	/* vb2 timestamps in nsecs, mmal in usecs */
 	vb2->vb2_buf.timestamp = mmal_buf->pts * 1000;
 
@@ -1061,7 +1093,7 @@ static void op_buffer_cb(struct vchiq_mmal_instance *instance,
 	if (mmal_buf->mmal_flags & MMAL_BUFFER_HEADER_FLAG_KEYFRAME)
 		vb2->flags |= V4L2_BUF_FLAG_KEYFRAME;
 
-	vb2_buffer_done(&vb2->vb2_buf, VB2_BUF_STATE_DONE);
+	vb2_buffer_done(&vb2->vb2_buf, buf_state);
 	ctx->num_op_buffers++;
 
 	v4l2_dbg(2, debug, &ctx->dev->v4l2_dev, "%s: done %d output buffers\n",
@@ -1788,6 +1820,17 @@ static int bcm2835_codec_set_level_profile(struct bcm2835_codec_ctx *ctx,
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_4_0:
 			param.level = MMAL_VIDEO_LEVEL_H264_4;
+			break;
+		/*
+		 * Note that the hardware spec is level 4.0. Levels above that
+		 * are there for correctly encoding the headers and may not
+		 * be able to keep up with real-time.
+		 */
+		case V4L2_MPEG_VIDEO_H264_LEVEL_4_1:
+			param.level = MMAL_VIDEO_LEVEL_H264_41;
+			break;
+		case V4L2_MPEG_VIDEO_H264_LEVEL_4_2:
+			param.level = MMAL_VIDEO_LEVEL_H264_42;
 			break;
 		default:
 			/* Should never get here */
