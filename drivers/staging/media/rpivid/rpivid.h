@@ -24,6 +24,10 @@
 
 #define OPT_DEBUG_POLL_IRQ  0
 
+#define RPIVID_DEC_ENV_COUNT 6
+#define RPIVID_P1BUF_COUNT 3
+#define RPIVID_P2BUF_COUNT 3
+
 #define RPIVID_NAME			"rpivid"
 
 #define RPIVID_CAPABILITY_UNTILED	BIT(0)
@@ -45,6 +49,7 @@ struct rpivid_control {
 };
 
 struct rpivid_h265_run {
+	u32 slice_ents;
 	const struct v4l2_ctrl_hevc_sps			*sps;
 	const struct v4l2_ctrl_hevc_pps			*pps;
 	const struct v4l2_ctrl_hevc_slice_params	*slice_params;
@@ -64,7 +69,6 @@ struct rpivid_buffer {
 
 struct rpivid_dec_state;
 struct rpivid_dec_env;
-#define RPIVID_DEC_ENV_COUNT 3
 
 struct rpivid_gptr {
 	size_t size;
@@ -79,18 +83,31 @@ typedef void (*rpivid_irq_callback)(struct rpivid_dev *dev, void *ctx);
 struct rpivid_q_aux;
 #define RPIVID_AUX_ENT_COUNT VB2_MAX_FRAME
 
-#define RPIVID_P2BUF_COUNT 2
+
+#define RPIVID_CTX_STATE_STOPPED	0	/* stream_off */
+#define RPIVID_CTX_STATE_STREAM_ON	1	/* decoding */
+#define RPIVID_CTX_STATE_STREAM_STOP	2	/* in stream_off */
+#define RPIVID_CTX_STATE_STREAM_ERR	3	/* stream_on but broken */
 
 struct rpivid_ctx {
 	struct v4l2_fh			fh;
 	struct rpivid_dev		*dev;
 
-	struct v4l2_pix_format		src_fmt;
-	struct v4l2_pix_format		dst_fmt;
+	struct v4l2_pix_format_mplane	src_fmt;
+	struct v4l2_pix_format_mplane	dst_fmt;
 	int dst_fmt_set;
+
+	atomic_t 			stream_state;
+	struct clk_request		*clk_req;
+	int 				src_stream_on;
+	int 				dst_stream_on;
+
 	// fatal_err is set if an error has occurred s.t. decode cannot
 	// continue (such as running out of CMA)
 	int fatal_err;
+
+	/* Lock for queue operations */
+	struct mutex			ctx_mutex;
 
 	struct v4l2_ctrl_handler	hdl;
 	struct v4l2_ctrl		**ctrls;
@@ -108,11 +125,12 @@ struct rpivid_ctx {
 
 	struct rpivid_dec_env *dec_pool;
 
-	/* Some of these should be in dev */
-	struct rpivid_gptr bitbufs[1];  /* Will be 2 */
-	struct rpivid_gptr cmdbufs[1];  /* Will be 2 */
+	unsigned int p1idx;
+	atomic_t p1out;
+	struct rpivid_gptr bitbufs[RPIVID_P1BUF_COUNT];
+
+	/* *** Should be in dev *** */
 	unsigned int p2idx;
-	atomic_t p2out;
 	struct rpivid_gptr pu_bufs[RPIVID_P2BUF_COUNT];
 	struct rpivid_gptr coeff_bufs[RPIVID_P2BUF_COUNT];
 
@@ -141,6 +159,8 @@ struct rpivid_variant {
 
 struct rpivid_hw_irq_ent;
 
+#define RPIVID_ICTL_ENABLE_UNLIMITED (-1)
+
 struct rpivid_hw_irq_ctrl {
 	/* Spinlock protecting claim and tail */
 	spinlock_t lock;
@@ -151,6 +171,8 @@ struct rpivid_hw_irq_ctrl {
 	struct rpivid_hw_irq_ent *irq;
 	/* Non-zero => do not start a new job - outer layer sched pending */
 	int no_sched;
+	/* Enable count. -1 always OK, 0 do not sched, +ve shed & count down */
+	int enable;
 	/* Thread CB requested */
 	bool thread_reqed;
 };
@@ -163,7 +185,7 @@ struct rpivid_dev {
 	struct platform_device	*pdev;
 	struct device		*dev;
 	struct v4l2_m2m_dev	*m2m_dev;
-	struct rpivid_dec_ops	*dec_ops;
+	const struct rpivid_dec_ops *dec_ops;
 
 	/* Device file mutex */
 	struct mutex		dev_mutex;
@@ -172,14 +194,18 @@ struct rpivid_dev {
 	void __iomem		*base_h265;
 
 	struct clk		*clock;
-	struct clk_request      *hevc_req;
+
+	int			cache_align;
 
 	struct rpivid_hw_irq_ctrl ic_active1;
 	struct rpivid_hw_irq_ctrl ic_active2;
 };
 
-extern struct rpivid_dec_ops rpivid_dec_ops_h265;
+extern const struct rpivid_dec_ops rpivid_dec_ops_h265;
+extern const struct v4l2_ctrl_ops rpivid_hevc_sps_ctrl_ops;
+extern const struct v4l2_ctrl_ops rpivid_hevc_pps_ctrl_ops;
 
+struct v4l2_ctrl *rpivid_find_ctrl(struct rpivid_ctx *ctx, u32 id);
 void *rpivid_find_control_data(struct rpivid_ctx *ctx, u32 id);
 
 #endif

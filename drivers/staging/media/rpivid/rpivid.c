@@ -38,12 +38,14 @@ static const struct rpivid_control rpivid_ctrls[] = {
 	{
 		.cfg = {
 			.id	= V4L2_CID_MPEG_VIDEO_HEVC_SPS,
+			.ops	= &rpivid_hevc_sps_ctrl_ops,
 		},
 		.required	= true,
 	},
 	{
 		.cfg = {
 			.id	= V4L2_CID_MPEG_VIDEO_HEVC_PPS,
+			.ops	= &rpivid_hevc_pps_ctrl_ops,
 		},
 		.required	= true,
 	},
@@ -79,15 +81,22 @@ static const struct rpivid_control rpivid_ctrls[] = {
 
 #define rpivid_ctrls_COUNT	ARRAY_SIZE(rpivid_ctrls)
 
-void *rpivid_find_control_data(struct rpivid_ctx *ctx, u32 id)
+struct v4l2_ctrl *rpivid_find_ctrl(struct rpivid_ctx *ctx, u32 id)
 {
 	unsigned int i;
 
 	for (i = 0; ctx->ctrls[i]; i++)
 		if (ctx->ctrls[i]->id == id)
-			return ctx->ctrls[i]->p_cur.p;
+			return ctx->ctrls[i];
 
 	return NULL;
+}
+
+void *rpivid_find_control_data(struct rpivid_ctx *ctx, u32 id)
+{
+	struct v4l2_ctrl *const ctrl = rpivid_find_ctrl(ctx, id);
+
+	return !ctrl ? NULL : ctrl->p_cur.p;
 }
 
 static int rpivid_init_ctrls(struct rpivid_dev *dev, struct rpivid_ctx *ctx)
@@ -112,7 +121,7 @@ static int rpivid_init_ctrls(struct rpivid_dev *dev, struct rpivid_ctx *ctx)
 
 	for (i = 0; i < rpivid_ctrls_COUNT; i++) {
 		ctrl = v4l2_ctrl_new_custom(hdl, &rpivid_ctrls[i].cfg,
-					    NULL);
+					    ctx);
 		if (hdl->error) {
 			v4l2_err(&dev->v4l2_dev,
 				 "Failed to create new custom control id=%#x\n",
@@ -184,6 +193,7 @@ static int rpivid_request_validate(struct media_request *req)
 		if (!ctrl_test) {
 			v4l2_info(&ctx->dev->v4l2_dev,
 				  "Missing required codec control\n");
+			v4l2_ctrl_request_hdl_put(hdl);
 			return -ENOENT;
 		}
 	}
@@ -205,8 +215,11 @@ static int rpivid_open(struct file *file)
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
 		mutex_unlock(&dev->dev_mutex);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_unlock;
 	}
+
+	mutex_init(&ctx->ctx_mutex);
 
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	file->private_data = &ctx->fh;
@@ -238,7 +251,9 @@ static int rpivid_open(struct file *file)
 err_ctrls:
 	v4l2_ctrl_handler_free(&ctx->hdl);
 err_free:
+	mutex_destroy(&ctx->ctx_mutex);
 	kfree(ctx);
+err_unlock:
 	mutex_unlock(&dev->dev_mutex);
 
 	return ret;
@@ -259,6 +274,7 @@ static int rpivid_release(struct file *file)
 	kfree(ctx->ctrls);
 
 	v4l2_fh_exit(&ctx->fh);
+	mutex_destroy(&ctx->ctx_mutex);
 
 	kfree(ctx);
 
@@ -283,7 +299,7 @@ static const struct video_device rpivid_video_device = {
 	.ioctl_ops	= &rpivid_ioctl_ops,
 	.minor		= -1,
 	.release	= video_device_release_empty,
-	.device_caps	= V4L2_CAP_VIDEO_M2M | V4L2_CAP_STREAMING,
+	.device_caps	= V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING,
 };
 
 static const struct v4l2_m2m_ops rpivid_m2m_ops = {

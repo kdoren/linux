@@ -18,9 +18,12 @@
 
 #include "rpivid.h"
 #include "rpivid_hw.h"
+#include "rpivid_video.h"
 
 #define DEBUG_TRACE_P1_CMD 0
 #define DEBUG_TRACE_EXECUTION 0
+
+#define USE_REQUEST_PIN 1
 
 #if DEBUG_TRACE_EXECUTION
 #define xtrace_in(dev_, de_)\
@@ -113,41 +116,9 @@ static int gptr_realloc_new(struct rpivid_dev * const dev,
 	return 0;
 }
 
-/* floor(log2(x)) */
-static unsigned int log2_size(size_t x)
-{
-	unsigned int n = 0;
-
-	if (x & ~0xffff) {
-		n += 16;
-		x >>= 16;
-	}
-	if (x & ~0xff) {
-		n += 8;
-		x >>= 8;
-	}
-	if (x & ~0xf) {
-		n += 4;
-		x >>= 4;
-	}
-	if (x & ~3) {
-		n += 2;
-		x >>= 2;
-	}
-	return (x & ~1) ? n + 1 : n;
-}
-
-static size_t round_up_size(const size_t x)
-{
-	/* Admit no size < 256 */
-	const unsigned int n = x < 256 ? 8 : log2_size(x) - 1;
-
-	return x >= (3 << n) ? 4 << n : (3 << n);
-}
-
 static size_t next_size(const size_t x)
 {
-	return round_up_size(x + 1);
+	return rpivid_round_up_size(x + 1);
 }
 
 #define NUM_SCALING_FACTORS 4064 /* Not a typo = 0xbe0 + 0x400 */
@@ -192,8 +163,6 @@ struct rpivid_dec_env {
 	unsigned int decode_order;
 	int p1_status;		/* P1 status - what to realloc */
 
-	struct rpivid_dec_env *phase_wait_q_next;
-
 	struct rpi_cmd *cmd_fifo;
 	unsigned int cmd_len, cmd_max;
 	unsigned int num_slice_msgs;
@@ -202,20 +171,33 @@ struct rpivid_dec_env {
 	unsigned int dpbno_col;
 	u32 reg_slicestart;
 	int collocated_from_l0_flag;
-	unsigned int wpp_entry_x;
-	unsigned int wpp_entry_y;
+	/*
+	 * Last CTB/Tile X,Y processed by (wpp_)entry_point
+	 * Could be in _state as P0 only but needs updating where _state
+	 * is const
+	 */
+	unsigned int entry_ctb_x;
+	unsigned int entry_ctb_y;
+	unsigned int entry_tile_x;
+	unsigned int entry_tile_y;
+	unsigned int entry_qp;
+	u32 entry_slice;
 
 	u32 rpi_config2;
 	u32 rpi_framesize;
 	u32 rpi_currpoc;
 
 	struct vb2_v4l2_buffer *frame_buf; // Detached dest buffer
+	struct vb2_v4l2_buffer *src_buf;   // Detached src buffer
 	unsigned int frame_c_offset;
 	unsigned int frame_stride;
 	dma_addr_t frame_addr;
 	dma_addr_t ref_addrs[16];
 	struct rpivid_q_aux *frame_aux;
 	struct rpivid_q_aux *col_aux;
+
+	dma_addr_t cmd_addr;
+	size_t cmd_size;
 
 	dma_addr_t pu_base_vc;
 	dma_addr_t coeff_base_vc;
@@ -224,11 +206,16 @@ struct rpivid_dec_env {
 
 	struct rpivid_gptr *bit_copy_gptr;
 	size_t bit_copy_len;
-	struct rpivid_gptr *cmd_copy_gptr;
 
-	u16 slice_msgs[2 * HEVC_MAX_REFS * 8 + 3];
+#define SLICE_MSGS_MAX (2 * HEVC_MAX_REFS * 8 + 3)
+	u16 slice_msgs[SLICE_MSGS_MAX];
 	u8 scaling_factors[NUM_SCALING_FACTORS];
 
+#if USE_REQUEST_PIN
+	struct media_request *req_pin;
+#else
+	struct media_request_object *req_obj;
+#endif
 	struct rpivid_hw_irq_ent irq_ent;
 };
 
@@ -239,22 +226,17 @@ struct rpivid_dec_state {
 	struct v4l2_ctrl_hevc_pps pps;
 
 	// Helper vars & tables derived from sps/pps
-	unsigned int log2_ctb_size; /* log2 width of a CTB */
-	unsigned int ctb_width; /* Width in CTBs */
-	unsigned int ctb_height; /* Height in CTBs */
-	unsigned int ctb_size; /* Pic area in CTBs */
-	unsigned int num_tile_columns;
-	unsigned int num_tile_rows;
-	u8 column_width[member_size(struct v4l2_ctrl_hevc_pps,
-				    column_width_minus1)];
-	u8 row_height[member_size(struct v4l2_ctrl_hevc_pps,
-				  row_height_minus1)];
+	unsigned int log2_ctb_size;     /* log2 width of a CTB */
+	unsigned int ctb_width;         /* Width in CTBs */
+	unsigned int ctb_height;        /* Height in CTBs */
+	unsigned int ctb_size;          /* Pic area in CTBs */
+	unsigned int tile_width;        /* Width in tiles */
+	unsigned int tile_height;       /* Height in tiles */
 
 	int *col_bd;
 	int *row_bd;
 	int *ctb_addr_rs_to_ts;
 	int *ctb_addr_ts_to_rs;
-	int *tile_id;
 
 	// Aux starage for DPB
 	// Hold refs
@@ -274,7 +256,24 @@ struct rpivid_dec_state {
 	unsigned int slice_qp;
 	unsigned int max_num_merge_cand; // 0 if I-slice
 	bool dependent_slice_segment_flag;
+
+	unsigned int start_ts;          /* slice_segment_addr -> ts */
+	unsigned int start_ctb_x;       /* CTB X,Y of start_ts */
+	unsigned int start_ctb_y;
+	unsigned int prev_ctb_x;        /* CTB X,Y of start_ts - 1 */
+	unsigned int prev_ctb_y;
 };
+
+#if !USE_REQUEST_PIN
+static void dst_req_obj_release(struct media_request_object *object)
+{
+	kfree(object);
+}
+
+static const struct media_request_object_ops dst_req_obj_ops = {
+	.release = dst_req_obj_release,
+};
+#endif
 
 static inline int clip_int(const int x, const int lo, const int hi)
 {
@@ -288,15 +287,48 @@ static inline int clip_int(const int x, const int lo, const int hi)
 static int p1_z;
 #endif
 
-// ???? u16 addr - put in u32
-static int p1_apb_write(struct rpivid_dec_env *const de, const u16 addr,
-			const u32 data)
+static int cmds_check_space(struct rpivid_dec_env *const de, unsigned int n)
 {
-	if (de->cmd_len == de->cmd_max)
-		de->cmd_fifo =
-			krealloc(de->cmd_fifo,
-				 (de->cmd_max *= 2) * sizeof(struct rpi_cmd),
-				 GFP_KERNEL);
+	struct rpi_cmd *a;
+	unsigned int newmax;
+
+	if (n > 0x100000) {
+		v4l2_err(&de->ctx->dev->v4l2_dev,
+			 "%s: n %u implausible\n", __func__, n);
+		return -ENOMEM;
+	}
+
+	if (de->cmd_len + n <= de->cmd_max)
+		return 0;
+
+	newmax = roundup_pow_of_two(de->cmd_len + n);
+
+	a = krealloc(de->cmd_fifo, newmax * sizeof(struct rpi_cmd),
+		     GFP_KERNEL);
+	if (!a) {
+		v4l2_err(&de->ctx->dev->v4l2_dev,
+			 "Failed cmd buffer realloc from %u to %u\n",
+			 de->cmd_max, newmax);
+		return -ENOMEM;
+	}
+	v4l2_info(&de->ctx->dev->v4l2_dev,
+		  "cmd buffer realloc from %u to %u\n", de->cmd_max, newmax);
+
+	de->cmd_fifo = a;
+	de->cmd_max = newmax;
+	return 0;
+}
+
+// ???? u16 addr - put in u32
+static void p1_apb_write(struct rpivid_dec_env *const de, const u16 addr,
+			 const u32 data)
+{
+	if (de->cmd_len >= de->cmd_max) {
+		v4l2_err(&de->ctx->dev->v4l2_dev,
+			 "%s: Overflow @ %d\n", __func__, de->cmd_len);
+		return;
+	}
+
 	de->cmd_fifo[de->cmd_len].addr = addr;
 	de->cmd_fifo[de->cmd_len].data = data;
 
@@ -306,8 +338,7 @@ static int p1_apb_write(struct rpivid_dec_env *const de, const u16 addr,
 			  de->cmd_len, addr, data);
 	}
 #endif
-
-	return de->cmd_len++;
+	de->cmd_len++;
 }
 
 static int ctb_to_tile(unsigned int ctb, unsigned int *bd, int num)
@@ -319,15 +350,16 @@ static int ctb_to_tile(unsigned int ctb, unsigned int *bd, int num)
 	return i - 1;
 }
 
-static int ctb_to_slice_w_h(unsigned int ctb, int ctb_size, int width,
-			    unsigned int *bd, int num)
+static unsigned int ctb_to_tile_x(const struct rpivid_dec_state *const s,
+				  const unsigned int ctb_x)
 {
-	if (ctb < bd[num - 1])
-		return ctb_size;
-	else if (width % ctb_size)
-		return width % ctb_size;
-	else
-		return ctb_size;
+	return ctb_to_tile(ctb_x, s->col_bd, s->tile_width);
+}
+
+static unsigned int ctb_to_tile_y(const struct rpivid_dec_state *const s,
+				  const unsigned int ctb_y)
+{
+	return ctb_to_tile(ctb_y, s->row_bd, s->tile_height);
 }
 
 static void aux_q_free(struct rpivid_ctx *const ctx,
@@ -500,6 +532,7 @@ static const u8 prob_init[3][156] = {
 	},
 };
 
+#define CMDS_WRITE_PROB ((RPI_PROB_ARRAY_SIZE / 4) + 1)
 static void write_prob(struct rpivid_dec_env *const de,
 		       const struct rpivid_dec_state *const s)
 {
@@ -532,8 +565,18 @@ static void write_prob(struct rpivid_dec_env *const de,
 		p1_apb_write(de, 0x1000 + i,
 			     dst[i] + (dst[i + 1] << 8) + (dst[i + 2] << 16) +
 				     (dst[i + 3] << 24));
+
+	/*
+	 * Having written the prob array back it up
+	 * This is not always needed but is a small overhead that simplifies
+	 * (and speeds up) some multi-tile & WPP scenarios
+	 * There are no scenarios where having written a prob we ever want
+	 * a previous (non-initial) state back
+	 */
+	p1_apb_write(de, RPI_TRANSFER, PROB_BACKUP);
 }
 
+#define CMDS_WRITE_SCALING_FACTORS NUM_SCALING_FACTORS
 static void write_scaling_factors(struct rpivid_dec_env *const de)
 {
 	int i;
@@ -549,11 +592,12 @@ static inline __u32 dma_to_axi_addr(dma_addr_t a)
 	return (__u32)(a >> 6);
 }
 
-static void write_bitstream(struct rpivid_dec_env *const de,
-			    const struct rpivid_dec_state *const s)
+#define CMDS_WRITE_BITSTREAM 4
+static int write_bitstream(struct rpivid_dec_env *const de,
+			   const struct rpivid_dec_state *const s)
 {
-	// Note that FFmpeg removes emulation prevention bytes, so this is
-	// matched in the configuration here.
+	// Note that FFmpeg V4L2 does not remove emulation prevention bytes,
+	// so this is matched in the configuration here.
 	// Whether that is the correct behaviour or not is not clear in the
 	// spec.
 	const int rpi_use_emu = 1;
@@ -564,6 +608,13 @@ static void write_bitstream(struct rpivid_dec_env *const de,
 	if (s->src_addr != 0) {
 		addr = s->src_addr + offset;
 	} else {
+		if (len + de->bit_copy_len > de->bit_copy_gptr->size) {
+			v4l2_warn(&de->ctx->dev->v4l2_dev,
+				  "Bit copy buffer overflow: size=%zu, offset=%zu, len=%u\n",
+				  de->bit_copy_gptr->size,
+				  de->bit_copy_len, len);
+			return -ENOMEM;
+		}
 		memcpy(de->bit_copy_gptr->ptr + de->bit_copy_len,
 		       s->src_buf + offset, len);
 		addr = de->bit_copy_gptr->addr + de->bit_copy_len;
@@ -575,86 +626,36 @@ static void write_bitstream(struct rpivid_dec_env *const de,
 	p1_apb_write(de, RPI_BFNUM, len);
 	p1_apb_write(de, RPI_BFCONTROL, offset + (1 << 7)); // Stop
 	p1_apb_write(de, RPI_BFCONTROL, offset + (rpi_use_emu << 6));
+	return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
-static void write_slice(struct rpivid_dec_env *const de,
-			const struct rpivid_dec_state *const s,
-			const unsigned int slice_w,
-			const unsigned int slice_h)
+/*
+ * The slice constant part of the slice register - width and height need to
+ * be ORed in later as they are per-tile / WPP-row
+ */
+static u32 slice_reg_const(const struct rpivid_dec_state *const s)
 {
-	u32 u32 = (s->sh->slice_type << 12) +
-		  (((s->sh->flags &
-		     V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_LUMA) != 0)
-		   << 14) +
-		  (((s->sh->flags &
-		     V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_CHROMA) != 0)
-		   << 15) +
-		  (slice_w << 17) + (slice_h << 24);
+	u32 x = (s->max_num_merge_cand << 0) |
+		(s->nb_refs[L0] << 4) |
+		(s->nb_refs[L1] << 8) |
+		(s->sh->slice_type << 12);
 
-	u32 |= (s->max_num_merge_cand << 0) + (s->nb_refs[L0] << 4) +
-	       (s->nb_refs[L1] << 8);
+	if (s->sh->flags & V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_LUMA)
+		x |= BIT(14);
+	if (s->sh->flags & V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_CHROMA)
+		x |= BIT(15);
+	if (s->sh->slice_type == HEVC_SLICE_B &&
+	    (s->sh->flags & V4L2_HEVC_SLICE_PARAMS_FLAG_MVD_L1_ZERO))
+		x |= BIT(16);
 
-	if (s->sh->slice_type == HEVC_SLICE_B)
-		u32 |= ((s->sh->flags &
-			 V4L2_HEVC_SLICE_PARAMS_FLAG_MVD_L1_ZERO) != 0)
-		       << 16;
-	p1_apb_write(de, RPI_SLICE, u32);
-}
-
-//////////////////////////////////////////////////////////////////////////////
-// Tiles mode
-
-static void new_entry_point(struct rpivid_dec_env *const de,
-			    const struct rpivid_dec_state *const s,
-			    const int do_bte,
-			    const int reset_qp_y, const int ctb_addr_ts)
-{
-	int ctb_col = s->ctb_addr_ts_to_rs[ctb_addr_ts] %
-							de->pic_width_in_ctbs_y;
-	int ctb_row = s->ctb_addr_ts_to_rs[ctb_addr_ts] /
-							de->pic_width_in_ctbs_y;
-
-	int tile_x = ctb_to_tile(ctb_col, s->col_bd, s->num_tile_columns);
-	int tile_y = ctb_to_tile(ctb_row, s->row_bd, s->num_tile_rows);
-
-	int endx = s->col_bd[tile_x + 1] - 1;
-	int endy = s->row_bd[tile_y + 1] - 1;
-
-	u8 slice_w = ctb_to_slice_w_h(ctb_col, 1 << s->log2_ctb_size,
-				      s->sps.pic_width_in_luma_samples,
-				      s->col_bd, s->num_tile_columns);
-	u8 slice_h = ctb_to_slice_w_h(ctb_row, 1 << s->log2_ctb_size,
-				      s->sps.pic_height_in_luma_samples,
-				      s->row_bd, s->num_tile_rows);
-
-	p1_apb_write(de, RPI_TILESTART,
-		     s->col_bd[tile_x] + (s->row_bd[tile_y] << 16));
-	p1_apb_write(de, RPI_TILEEND, endx + (endy << 16));
-
-	if (do_bte)
-		p1_apb_write(de, RPI_BEGINTILEEND, endx + (endy << 16));
-
-	write_slice(de, s, slice_w, slice_h);
-
-	if (reset_qp_y) {
-		unsigned int sps_qp_bd_offset =
-			6 * s->sps.bit_depth_luma_minus8;
-
-		p1_apb_write(de, RPI_QP, sps_qp_bd_offset + s->slice_qp);
-	}
-
-	p1_apb_write(de, RPI_MODE,
-		     (0xFFFF << 0) + (0x0 << 16) +
-			     ((tile_x == s->num_tile_columns - 1) << 17) +
-			     ((tile_y == s->num_tile_rows - 1) << 18));
-
-	p1_apb_write(de, RPI_CONTROL, (ctb_col << 0) + (ctb_row << 16));
+	return x;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
+#define CMDS_NEW_SLICE_SEGMENT (4 + CMDS_WRITE_SCALING_FACTORS)
 static void new_slice_segment(struct rpivid_dec_env *const de,
 			      const struct rpivid_dec_state *const s)
 {
@@ -738,6 +739,7 @@ static void msg_slice(struct rpivid_dec_env *const de, const u16 msg)
 	de->slice_msgs[de->num_slice_msgs++] = msg;
 }
 
+#define CMDS_PROGRAM_SLICECMDS (1 + SLICE_MSGS_MAX)
 static void program_slicecmds(struct rpivid_dec_env *const de,
 			      const int sliceid)
 {
@@ -934,24 +936,87 @@ static void pre_slice_decode(struct rpivid_dec_env *const de,
 		       (sh->slice_cb_qp_offset & 31)); // CMD_QPOFF
 }
 
-//////////////////////////////////////////////////////////////////////////////
-// Write STATUS register with expected end CTU address of previous slice
-
-static void end_previous_slice(struct rpivid_dec_env *const de,
-			       const struct rpivid_dec_state *const s,
-			       const int ctb_addr_ts)
+#define CMDS_WRITE_SLICE 1
+static void write_slice(struct rpivid_dec_env *const de,
+			const struct rpivid_dec_state *const s,
+			const u32 slice_const,
+			const unsigned int ctb_col,
+			const unsigned int ctb_row)
 {
-	int last_x =
-		s->ctb_addr_ts_to_rs[ctb_addr_ts - 1] % de->pic_width_in_ctbs_y;
-	int last_y =
-		s->ctb_addr_ts_to_rs[ctb_addr_ts - 1] / de->pic_width_in_ctbs_y;
+	const unsigned int cs = (1 << s->log2_ctb_size);
+	const unsigned int w_last = s->sps.pic_width_in_luma_samples & (cs - 1);
+	const unsigned int h_last = s->sps.pic_height_in_luma_samples & (cs - 1);
 
-	p1_apb_write(de, RPI_STATUS, 1 + (last_x << 5) + (last_y << 18));
+	p1_apb_write(de, RPI_SLICE,
+		     slice_const |
+		     ((ctb_col + 1 < s->ctb_width || !w_last ?
+				cs : w_last) << 17) |
+		     ((ctb_row + 1 < s->ctb_height || !h_last ?
+				cs : h_last) << 24));
 }
 
+#define PAUSE_MODE_WPP  1
+#define PAUSE_MODE_TILE 0xffff
+
+/*
+ * N.B. This can be called to fill in data from the previous slice so must not
+ * use any state data that may change from slice to slice (e.g. qp)
+ */
+#define CMDS_NEW_ENTRY_POINT (6 + CMDS_WRITE_SLICE)
+static void new_entry_point(struct rpivid_dec_env *const de,
+			    const struct rpivid_dec_state *const s,
+			    const bool do_bte,
+			    const bool reset_qp_y,
+			    const u32 pause_mode,
+			    const unsigned int tile_x,
+			    const unsigned int tile_y,
+			    const unsigned int ctb_col,
+			    const unsigned int ctb_row,
+			    const unsigned int slice_qp,
+			    const u32 slice_const)
+{
+	const unsigned int endx = s->col_bd[tile_x + 1] - 1;
+	const unsigned int endy = (pause_mode == PAUSE_MODE_WPP) ?
+		ctb_row : s->row_bd[tile_y + 1] - 1;
+
+	p1_apb_write(de, RPI_TILESTART,
+		     s->col_bd[tile_x] | (s->row_bd[tile_y] << 16));
+	p1_apb_write(de, RPI_TILEEND, endx | (endy << 16));
+
+	if (do_bte)
+		p1_apb_write(de, RPI_BEGINTILEEND, endx | (endy << 16));
+
+	write_slice(de, s, slice_const, endx, endy);
+
+	if (reset_qp_y) {
+		unsigned int sps_qp_bd_offset =
+			6 * s->sps.bit_depth_luma_minus8;
+
+		p1_apb_write(de, RPI_QP, sps_qp_bd_offset + slice_qp);
+	}
+
+	p1_apb_write(de, RPI_MODE,
+		     pause_mode |
+			((endx == s->ctb_width - 1) << 17) |
+			((endy == s->ctb_height - 1) << 18));
+
+	p1_apb_write(de, RPI_CONTROL, (ctb_col << 0) | (ctb_row << 16));
+
+	de->entry_tile_x = tile_x;
+	de->entry_tile_y = tile_y;
+	de->entry_ctb_x = ctb_col;
+	de->entry_ctb_y = ctb_row;
+	de->entry_qp = slice_qp;
+	de->entry_slice = slice_const;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Wavefront mode
+
+#define CMDS_WPP_PAUSE 4
 static void wpp_pause(struct rpivid_dec_env *const de, int ctb_row)
 {
-	p1_apb_write(de, RPI_STATUS, (ctb_row << 18) + 0x25);
+	p1_apb_write(de, RPI_STATUS, (ctb_row << 18) | 0x25);
 	p1_apb_write(de, RPI_TRANSFER, PROB_BACKUP);
 	p1_apb_write(de, RPI_MODE,
 		     ctb_row == de->pic_height_in_ctbs_y - 1 ?
@@ -959,186 +1024,255 @@ static void wpp_pause(struct rpivid_dec_env *const de, int ctb_row)
 	p1_apb_write(de, RPI_CONTROL, (ctb_row << 16) + 2);
 }
 
-static void wpp_end_previous_slice(struct rpivid_dec_env *const de,
-				   const struct rpivid_dec_state *const s,
-				   int ctb_addr_ts)
+#define CMDS_WPP_ENTRY_FILL_1 (CMDS_WPP_PAUSE + 2 + CMDS_NEW_ENTRY_POINT)
+static int wpp_entry_fill(struct rpivid_dec_env *const de,
+			  const struct rpivid_dec_state *const s,
+			  const unsigned int last_y)
 {
-	int new_x = s->sh->slice_segment_addr % de->pic_width_in_ctbs_y;
-	int new_y = s->sh->slice_segment_addr / de->pic_width_in_ctbs_y;
-	int last_x =
-		s->ctb_addr_ts_to_rs[ctb_addr_ts - 1] % de->pic_width_in_ctbs_y;
-	int last_y =
-		s->ctb_addr_ts_to_rs[ctb_addr_ts - 1] / de->pic_width_in_ctbs_y;
+	int rv;
+	const unsigned int last_x = s->ctb_width - 1;
 
-	if (de->wpp_entry_x < 2 && (de->wpp_entry_y < new_y || new_x > 2) &&
-	    de->pic_width_in_ctbs_y > 2)
-		wpp_pause(de, last_y);
-	p1_apb_write(de, RPI_STATUS, 1 + (last_x << 5) + (last_y << 18));
-	if (new_x == 2 || (de->pic_width_in_ctbs_y == 2 &&
-			   de->wpp_entry_y < new_y))
-		p1_apb_write(de, RPI_TRANSFER, PROB_BACKUP);
-}
+	rv = cmds_check_space(de, CMDS_WPP_ENTRY_FILL_1 *
+				  (last_y - de->entry_ctb_y));
+	if (rv)
+		return rv;
 
-//////////////////////////////////////////////////////////////////////////////
-// Wavefront mode
-
-static void wpp_entry_point(struct rpivid_dec_env *const de,
-			    const struct rpivid_dec_state *const s,
-			    const int do_bte,
-			    const int reset_qp_y, const int ctb_addr_ts)
-{
-	int ctb_size = 1 << s->log2_ctb_size;
-	int ctb_addr_rs = s->ctb_addr_ts_to_rs[ctb_addr_ts];
-
-	int ctb_col = de->wpp_entry_x = ctb_addr_rs % de->pic_width_in_ctbs_y;
-	int ctb_row = de->wpp_entry_y = ctb_addr_rs / de->pic_width_in_ctbs_y;
-
-	int endx = de->pic_width_in_ctbs_y - 1;
-	int endy = ctb_row;
-
-	u8 slice_w = ctb_to_slice_w_h(ctb_col, ctb_size,
-				      s->sps.pic_width_in_luma_samples,
-				      s->col_bd, s->num_tile_columns);
-	u8 slice_h = ctb_to_slice_w_h(ctb_row, ctb_size,
-				      s->sps.pic_height_in_luma_samples,
-				      s->row_bd, s->num_tile_rows);
-
-	p1_apb_write(de, RPI_TILESTART, 0);
-	p1_apb_write(de, RPI_TILEEND, endx + (endy << 16));
-
-	if (do_bte)
-		p1_apb_write(de, RPI_BEGINTILEEND, endx + (endy << 16));
-
-	write_slice(de, s, slice_w,
-		    ctb_row == de->pic_height_in_ctbs_y - 1 ?
-							slice_h : ctb_size);
-
-	if (reset_qp_y) {
-		unsigned int sps_qp_bd_offset =
-			6 * s->sps.bit_depth_luma_minus8;
-
-		p1_apb_write(de, RPI_QP, sps_qp_bd_offset + s->slice_qp);
-	}
-
-	p1_apb_write(de, RPI_MODE,
-		     ctb_row == de->pic_height_in_ctbs_y - 1 ?
-							0x60001 : 0x20001);
-	p1_apb_write(de, RPI_CONTROL, (ctb_col << 0) + (ctb_row << 16));
-}
-
-//////////////////////////////////////////////////////////////////////////////
-// Wavefront mode
-
-static void wpp_decode_slice(struct rpivid_dec_env *const de,
-			     const struct rpivid_dec_state *const s,
-			     const struct v4l2_ctrl_hevc_slice_params *sh,
-			     int ctb_addr_ts)
-{
-	int i, reset_qp_y = 1;
-	int indep = !s->dependent_slice_segment_flag;
-	int ctb_col = s->sh->slice_segment_addr % de->pic_width_in_ctbs_y;
-
-	if (ctb_addr_ts)
-		wpp_end_previous_slice(de, s, ctb_addr_ts);
-	pre_slice_decode(de, s);
-	write_bitstream(de, s);
-	if (ctb_addr_ts == 0 || indep || de->pic_width_in_ctbs_y == 1)
-		write_prob(de, s);
-	else if (ctb_col == 0)
-		p1_apb_write(de, RPI_TRANSFER, PROB_RELOAD);
-	else
-		reset_qp_y = 0;
-	program_slicecmds(de, s->slice_idx);
-	new_slice_segment(de, s);
-	wpp_entry_point(de, s, indep, reset_qp_y, ctb_addr_ts);
-
-	for (i = 0; i < s->sh->num_entry_point_offsets; i++) {
-		int ctb_addr_rs = s->ctb_addr_ts_to_rs[ctb_addr_ts];
-		int ctb_row = ctb_addr_rs / de->pic_width_in_ctbs_y;
-		int last_x = de->pic_width_in_ctbs_y - 1;
-
-		if (de->pic_width_in_ctbs_y > 2)
-			wpp_pause(de, ctb_row);
+	while (de->entry_ctb_y < last_y) {
+		/* wpp_entry_x/y set by wpp_entry_point */
+		if (s->ctb_width > 2)
+			wpp_pause(de, de->entry_ctb_y);
 		p1_apb_write(de, RPI_STATUS,
-			     (ctb_row << 18) + (last_x << 5) + 2);
-		if (de->pic_width_in_ctbs_y == 2)
+			     (de->entry_ctb_y << 18) | (last_x << 5) | 2);
+
+		/* if width == 1 then the saved state is the init one */
+		if (s->ctb_width == 2)
 			p1_apb_write(de, RPI_TRANSFER, PROB_BACKUP);
-		if (de->pic_width_in_ctbs_y == 1)
-			write_prob(de, s);
 		else
 			p1_apb_write(de, RPI_TRANSFER, PROB_RELOAD);
-		ctb_addr_ts += s->column_width[0];
-		wpp_entry_point(de, s, 0, 1, ctb_addr_ts);
+
+		new_entry_point(de, s, false, true, PAUSE_MODE_WPP,
+				0, 0, 0, de->entry_ctb_y + 1,
+				de->entry_qp, de->entry_slice);
 	}
+	return 0;
+}
+
+static int wpp_end_previous_slice(struct rpivid_dec_env *const de,
+				  const struct rpivid_dec_state *const s)
+{
+	int rv;
+
+	rv = wpp_entry_fill(de, s, s->prev_ctb_y);
+	if (rv)
+		return rv;
+
+	rv = cmds_check_space(de, CMDS_WPP_PAUSE + 2);
+	if (rv)
+		return rv;
+
+	if (de->entry_ctb_x < 2 &&
+	    (de->entry_ctb_y < s->start_ctb_y || s->start_ctb_x > 2) &&
+	    s->ctb_width > 2)
+		wpp_pause(de, s->prev_ctb_y);
+	p1_apb_write(de, RPI_STATUS,
+		     1 | (s->prev_ctb_x << 5) | (s->prev_ctb_y << 18));
+	if (s->start_ctb_x == 2 ||
+	    (s->ctb_width == 2 && de->entry_ctb_y < s->start_ctb_y))
+		p1_apb_write(de, RPI_TRANSFER, PROB_BACKUP);
+	return 0;
+}
+
+/* Only main profile supported so WPP => !Tiles which makes some of the
+ * next chunk code simpler
+ */
+static int wpp_decode_slice(struct rpivid_dec_env *const de,
+			    const struct rpivid_dec_state *const s)
+{
+	bool reset_qp_y = true;
+	const bool indep = !s->dependent_slice_segment_flag;
+	int rv;
+
+	if (s->start_ts) {
+		rv = wpp_end_previous_slice(de, s);
+		if (rv)
+			return rv;
+	}
+	pre_slice_decode(de, s);
+
+	rv = cmds_check_space(de,
+			      CMDS_WRITE_BITSTREAM +
+				CMDS_WRITE_PROB +
+				CMDS_PROGRAM_SLICECMDS +
+				CMDS_NEW_SLICE_SEGMENT +
+				CMDS_NEW_ENTRY_POINT);
+	if (rv)
+		return rv;
+
+	rv = write_bitstream(de, s);
+	if (rv)
+		return rv;
+
+	if (!s->start_ts || indep || s->ctb_width == 1)
+		write_prob(de, s);
+	else if (!s->start_ctb_x)
+		p1_apb_write(de, RPI_TRANSFER, PROB_RELOAD);
+	else
+		reset_qp_y = false;
+
+	program_slicecmds(de, s->slice_idx);
+	new_slice_segment(de, s);
+	new_entry_point(de, s, indep, reset_qp_y, PAUSE_MODE_WPP,
+			0, 0, s->start_ctb_x, s->start_ctb_y,
+			s->slice_qp, slice_reg_const(s));
+
+	if (s->frame_end) {
+		rv = wpp_entry_fill(de, s, s->ctb_height - 1);
+		if (rv)
+			return rv;
+
+		rv = cmds_check_space(de, CMDS_WPP_PAUSE + 1);
+		if (rv)
+			return rv;
+
+		if (de->entry_ctb_x < 2 && s->ctb_width > 2)
+			wpp_pause(de, s->ctb_height - 1);
+
+		p1_apb_write(de, RPI_STATUS,
+			     1 | ((s->ctb_width - 1) << 5) |
+				((s->ctb_height - 1) << 18));
+	}
+	return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 // Tiles mode
 
-static void decode_slice(struct rpivid_dec_env *const de,
-			 const struct rpivid_dec_state *const s,
-			 const struct v4l2_ctrl_hevc_slice_params *const sh,
-			 int ctb_addr_ts)
+// Guarantees 1 cmd entry free on exit
+static int tile_entry_fill(struct rpivid_dec_env *const de,
+			   const struct rpivid_dec_state *const s,
+			   const unsigned int last_tile_x,
+			   const unsigned int last_tile_y)
 {
-	int i, reset_qp_y;
+	while (de->entry_tile_y < last_tile_y ||
+	       (de->entry_tile_y == last_tile_y &&
+		de->entry_tile_x < last_tile_x)) {
+		int rv;
+		unsigned int t_x = de->entry_tile_x;
+		unsigned int t_y = de->entry_tile_y;
+		const unsigned int last_x = s->col_bd[t_x + 1] - 1;
+		const unsigned int last_y = s->row_bd[t_y + 1] - 1;
 
-	if (ctb_addr_ts)
-		end_previous_slice(de, s, ctb_addr_ts);
+		// One more than needed here
+		rv = cmds_check_space(de, CMDS_NEW_ENTRY_POINT + 3);
+		if (rv)
+			return rv;
+
+		p1_apb_write(de, RPI_STATUS,
+			     2 | (last_x << 5) | (last_y << 18));
+		p1_apb_write(de, RPI_TRANSFER, PROB_RELOAD);
+
+		// Inc tile
+		if (++t_x >= s->tile_width) {
+			t_x = 0;
+			++t_y;
+		}
+
+		new_entry_point(de, s, false, true, PAUSE_MODE_TILE,
+				t_x, t_y, s->col_bd[t_x], s->row_bd[t_y],
+				de->entry_qp, de->entry_slice);
+	}
+	return 0;
+}
+
+/*
+ * Write STATUS register with expected end CTU address of previous slice
+ */
+static int end_previous_slice(struct rpivid_dec_env *const de,
+			      const struct rpivid_dec_state *const s)
+{
+	int rv;
+
+	rv = tile_entry_fill(de, s,
+			     ctb_to_tile_x(s, s->prev_ctb_x),
+			     ctb_to_tile_y(s, s->prev_ctb_y));
+	if (rv)
+		return rv;
+
+	p1_apb_write(de, RPI_STATUS,
+		     1 | (s->prev_ctb_x << 5) | (s->prev_ctb_y << 18));
+	return 0;
+}
+
+static int decode_slice(struct rpivid_dec_env *const de,
+			const struct rpivid_dec_state *const s)
+{
+	bool reset_qp_y;
+	unsigned int tile_x = ctb_to_tile_x(s, s->start_ctb_x);
+	unsigned int tile_y = ctb_to_tile_y(s, s->start_ctb_y);
+	int rv;
+
+	if (s->start_ts) {
+		rv = end_previous_slice(de, s);
+		if (rv)
+			return rv;
+	}
+
+	rv = cmds_check_space(de,
+			      CMDS_WRITE_BITSTREAM +
+				CMDS_WRITE_PROB +
+				CMDS_PROGRAM_SLICECMDS +
+				CMDS_NEW_SLICE_SEGMENT +
+				CMDS_NEW_ENTRY_POINT);
+	if (rv)
+		return rv;
 
 	pre_slice_decode(de, s);
-	write_bitstream(de, s);
+	rv = write_bitstream(de, s);
+	if (rv)
+		return rv;
 
-#if DEBUG_TRACE_P1_CMD
-	if (p1_z < 256) {
-		v4l2_info(&de->ctx->dev->v4l2_dev,
-			  "TS=%d, tile=%d/%d, dss=%d, flags=%#llx\n",
-			  ctb_addr_ts, s->tile_id[ctb_addr_ts],
-			  s->tile_id[ctb_addr_ts - 1],
-			  s->dependent_slice_segment_flag, sh->flags);
-	}
-#endif
-
-	reset_qp_y = ctb_addr_ts == 0 ||
-		   s->tile_id[ctb_addr_ts] != s->tile_id[ctb_addr_ts - 1] ||
-		   !s->dependent_slice_segment_flag;
+	reset_qp_y = !s->start_ts ||
+		!s->dependent_slice_segment_flag ||
+		tile_x != ctb_to_tile_x(s, s->prev_ctb_x) ||
+		tile_y != ctb_to_tile_y(s, s->prev_ctb_y);
 	if (reset_qp_y)
 		write_prob(de, s);
 
 	program_slicecmds(de, s->slice_idx);
 	new_slice_segment(de, s);
 	new_entry_point(de, s, !s->dependent_slice_segment_flag, reset_qp_y,
-			ctb_addr_ts);
+			PAUSE_MODE_TILE,
+			tile_x, tile_y, s->start_ctb_x, s->start_ctb_y,
+			s->slice_qp, slice_reg_const(s));
 
-	for (i = 0; i < s->sh->num_entry_point_offsets; i++) {
-		int ctb_addr_rs = s->ctb_addr_ts_to_rs[ctb_addr_ts];
-		int ctb_col = ctb_addr_rs % de->pic_width_in_ctbs_y;
-		int ctb_row = ctb_addr_rs / de->pic_width_in_ctbs_y;
-		int tile_x = ctb_to_tile(ctb_col, s->col_bd,
-					 s->num_tile_columns - 1);
-		int tile_y =
-			ctb_to_tile(ctb_row, s->row_bd, s->num_tile_rows - 1);
-		int last_x = s->col_bd[tile_x + 1] - 1;
-		int last_y = s->row_bd[tile_y + 1] - 1;
-
+	/*
+	 * If this is the last slice then fill in the other tile entries
+	 * now, otherwise this will be done at the start of the next slice
+	 * when it will be known where this slice finishes
+	 */
+	if (s->frame_end) {
+		rv = tile_entry_fill(de, s,
+				     s->tile_width - 1,
+				     s->tile_height - 1);
+		if (rv)
+			return rv;
 		p1_apb_write(de, RPI_STATUS,
-			     2 + (last_x << 5) + (last_y << 18));
-		write_prob(de, s);
-		ctb_addr_ts += s->column_width[tile_x] * s->row_height[tile_y];
-		new_entry_point(de, s, 0, 1, ctb_addr_ts);
+			     1 | ((s->ctb_width - 1) << 5) |
+				((s->ctb_height - 1) << 18));
 	}
+	return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 // Scaling factors
 
 static void expand_scaling_list(const unsigned int size_id,
-				const unsigned int matrix_id, u8 *const dst0,
+				u8 *const dst0,
 				const u8 *const src0, uint8_t dc)
 {
 	u8 *d;
 	unsigned int x, y;
 
-	// FIXME: matrix_id is unused ?
 	switch (size_id) {
 	case 0:
 		memcpy(dst0, src0, 16);
@@ -1199,24 +1333,20 @@ static void populate_scaling_factors(const struct rpivid_run *const run,
 	unsigned int mid;
 
 	for (mid = 0; mid < 6; mid++)
-		expand_scaling_list(0, mid,
-				    de->scaling_factors +
+		expand_scaling_list(0, de->scaling_factors +
 					    scaling_factor_offsets[0][mid],
 				    sl->scaling_list_4x4[mid], 0);
 	for (mid = 0; mid < 6; mid++)
-		expand_scaling_list(1, mid,
-				    de->scaling_factors +
+		expand_scaling_list(1, de->scaling_factors +
 					    scaling_factor_offsets[1][mid],
 				    sl->scaling_list_8x8[mid], 0);
 	for (mid = 0; mid < 6; mid++)
-		expand_scaling_list(2, mid,
-				    de->scaling_factors +
+		expand_scaling_list(2, de->scaling_factors +
 					    scaling_factor_offsets[2][mid],
 				    sl->scaling_list_16x16[mid],
 				    sl->scaling_list_dc_coef_16x16[mid]);
-	for (mid = 0; mid < 2; mid += 1)
-		expand_scaling_list(3, mid,
-				    de->scaling_factors +
+	for (mid = 0; mid < 2; mid++)
+		expand_scaling_list(3, de->scaling_factors +
 					    scaling_factor_offsets[3][mid],
 				    sl->scaling_list_32x32[mid],
 				    sl->scaling_list_dc_coef_32x32[mid]);
@@ -1228,8 +1358,6 @@ static void free_ps_info(struct rpivid_dec_state *const s)
 	s->ctb_addr_rs_to_ts = NULL;
 	kfree(s->ctb_addr_ts_to_rs);
 	s->ctb_addr_ts_to_rs = NULL;
-	kfree(s->tile_id);
-	s->tile_id = NULL;
 
 	kfree(s->col_bd);
 	s->col_bd = NULL;
@@ -1237,10 +1365,52 @@ static void free_ps_info(struct rpivid_dec_state *const s)
 	s->row_bd = NULL;
 }
 
+static unsigned int tile_width(const struct rpivid_dec_state *const s,
+			       const unsigned int t_x)
+{
+	return s->col_bd[t_x + 1] - s->col_bd[t_x];
+}
+
+static unsigned int tile_height(const struct rpivid_dec_state *const s,
+				const unsigned int t_y)
+{
+	return s->row_bd[t_y + 1] - s->row_bd[t_y];
+}
+
+static void fill_rs_to_ts(struct rpivid_dec_state *const s)
+{
+	unsigned int ts = 0;
+	unsigned int t_y;
+	unsigned int tr_rs = 0;
+
+	for (t_y = 0; t_y != s->tile_height; ++t_y) {
+		const unsigned int t_h = tile_height(s, t_y);
+		unsigned int t_x;
+		unsigned int tc_rs = tr_rs;
+
+		for (t_x = 0; t_x != s->tile_width; ++t_x) {
+			const unsigned int t_w = tile_width(s, t_x);
+			unsigned int y;
+			unsigned int rs = tc_rs;
+
+			for (y = 0; y != t_h; ++y) {
+				unsigned int x;
+
+				for (x = 0; x != t_w; ++x) {
+					s->ctb_addr_rs_to_ts[rs + x] = ts;
+					s->ctb_addr_ts_to_rs[ts] = rs + x;
+					++ts;
+				}
+				rs += s->ctb_width;
+			}
+			tc_rs += t_w;
+		}
+		tr_rs += t_h * s->ctb_width;
+	}
+}
+
 static int updated_ps(struct rpivid_dec_state *const s)
 {
-	unsigned int ctb_addr_rs;
-	int j, x, y, tile_id;
 	unsigned int i;
 
 	free_ps_info(s);
@@ -1259,118 +1429,71 @@ static int updated_ps(struct rpivid_dec_state *const s)
 
 	// Inferred parameters
 
-	if (!(s->pps.flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED)) {
-		s->num_tile_columns = 1;
-		s->num_tile_rows = 1;
-		s->column_width[0] = s->ctb_width;
-		s->row_height[0] = s->ctb_height;
-	} else {
-		s->num_tile_columns = s->pps.num_tile_columns_minus1 + 1;
-		s->num_tile_rows = s->pps.num_tile_rows_minus1 + 1;
-		for (i = 0; i < s->num_tile_columns; ++i)
-			s->column_width[i] = s->pps.column_width_minus1[i] + 1;
-		for (i = 0; i < s->num_tile_rows; ++i)
-			s->row_height[i] = s->pps.row_height_minus1[i] + 1;
-	}
-
-	s->col_bd = kmalloc((s->num_tile_columns + 1) * sizeof(*s->col_bd),
-			    GFP_KERNEL);
-	s->row_bd = kmalloc((s->num_tile_rows + 1) * sizeof(*s->row_bd),
-			    GFP_KERNEL);
-
-	s->col_bd[0] = 0;
-	for (i = 0; i < s->num_tile_columns; i++)
-		s->col_bd[i + 1] = s->col_bd[i] + s->column_width[i];
-
-	s->row_bd[0] = 0;
-	for (i = 0; i < s->num_tile_rows; i++)
-		s->row_bd[i + 1] = s->row_bd[i] + s->row_height[i];
-
 	s->ctb_addr_rs_to_ts = kmalloc_array(s->ctb_size,
 					     sizeof(*s->ctb_addr_rs_to_ts),
 					     GFP_KERNEL);
+	if (!s->ctb_addr_rs_to_ts)
+		goto fail;
 	s->ctb_addr_ts_to_rs = kmalloc_array(s->ctb_size,
 					     sizeof(*s->ctb_addr_ts_to_rs),
 					     GFP_KERNEL);
-	s->tile_id = kmalloc_array(s->ctb_size, sizeof(*s->tile_id),
-				   GFP_KERNEL);
+	if (!s->ctb_addr_ts_to_rs)
+		goto fail;
 
-	for (ctb_addr_rs = 0; ctb_addr_rs < s->ctb_size; ctb_addr_rs++) {
-		int tb_x = ctb_addr_rs % s->ctb_width;
-		int tb_y = ctb_addr_rs / s->ctb_width;
-		int tile_x = 0;
-		int tile_y = 0;
-		int val = 0;
-
-		for (i = 0; i < s->num_tile_columns; i++) {
-			if (tb_x < s->col_bd[i + 1]) {
-				tile_x = i;
-				break;
-			}
-		}
-
-		for (i = 0; i < s->num_tile_rows; i++) {
-			if (tb_y < s->row_bd[i + 1]) {
-				tile_y = i;
-				break;
-			}
-		}
-
-		for (i = 0; i < tile_x; i++)
-			val += s->row_height[tile_y] * s->column_width[i];
-		for (i = 0; i < tile_y; i++)
-			val += s->ctb_width * s->row_height[i];
-
-		val += (tb_y - s->row_bd[tile_y]) * s->column_width[tile_x] +
-		       tb_x - s->col_bd[tile_x];
-
-		s->ctb_addr_rs_to_ts[ctb_addr_rs] = val;
-		s->ctb_addr_ts_to_rs[val] = ctb_addr_rs;
+	if (!(s->pps.flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED)) {
+		s->tile_width = 1;
+		s->tile_height = 1;
+	} else {
+		s->tile_width = s->pps.num_tile_columns_minus1 + 1;
+		s->tile_height = s->pps.num_tile_rows_minus1 + 1;
 	}
 
-	for (j = 0, tile_id = 0; j < s->num_tile_rows; j++)
-		for (i = 0; i < s->num_tile_columns; i++, tile_id++)
-			for (y = s->row_bd[j]; y < s->row_bd[j + 1]; y++)
-				for (x = s->col_bd[i];
-				     x < s->col_bd[i + 1];
-				     x++)
-					s->tile_id[s->ctb_addr_rs_to_ts
-							   [y * s->ctb_width +
-							    x]] = tile_id;
+	s->col_bd = kmalloc((s->tile_width + 1) * sizeof(*s->col_bd),
+			    GFP_KERNEL);
+	if (!s->col_bd)
+		goto fail;
+	s->row_bd = kmalloc((s->tile_height + 1) * sizeof(*s->row_bd),
+			    GFP_KERNEL);
+	if (!s->row_bd)
+		goto fail;
 
+	s->col_bd[0] = 0;
+	for (i = 1; i < s->tile_width; i++)
+		s->col_bd[i] = s->col_bd[i - 1] +
+			s->pps.column_width_minus1[i - 1] + 1;
+	s->col_bd[s->tile_width] = s->ctb_width;
+
+	s->row_bd[0] = 0;
+	for (i = 1; i < s->tile_height; i++)
+		s->row_bd[i] = s->row_bd[i - 1] +
+			s->pps.row_height_minus1[i - 1] + 1;
+	s->row_bd[s->tile_height] = s->ctb_height;
+
+	fill_rs_to_ts(s);
 	return 0;
+
+fail:
+	free_ps_info(s);
+	/* Set invalid to force reload */
+	s->sps.pic_width_in_luma_samples = 0;
+	return -ENOMEM;
 }
 
-static int frame_end(struct rpivid_dev *const dev,
-		     struct rpivid_dec_env *const de,
-		     const struct rpivid_dec_state *const s)
+static int write_cmd_buffer(struct rpivid_dev *const dev,
+			    struct rpivid_dec_env *const de,
+			    const struct rpivid_dec_state *const s)
 {
-	const unsigned int last_x = s->col_bd[s->num_tile_columns] - 1;
-	const unsigned int last_y = s->row_bd[s->num_tile_rows] - 1;
-	size_t cmd_size;
+	const size_t cmd_size = ALIGN(de->cmd_len * sizeof(de->cmd_fifo[0]),
+				      dev->cache_align);
 
-	if (s->pps.flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED) {
-		if (de->wpp_entry_x < 2 && de->pic_width_in_ctbs_y > 2)
-			wpp_pause(de, last_y);
+	de->cmd_addr = dma_map_single(dev->dev, de->cmd_fifo,
+				      cmd_size, DMA_TO_DEVICE);
+	if (dma_mapping_error(dev->dev, de->cmd_addr)) {
+		v4l2_err(&dev->v4l2_dev,
+			 "Map cmd buffer (%zu): FAILED\n", cmd_size);
+		return -ENOMEM;
 	}
-	p1_apb_write(de, RPI_STATUS, 1 + (last_x << 5) + (last_y << 18));
-
-	// Copy commands out to dma buf
-	cmd_size = de->cmd_len * sizeof(de->cmd_fifo[0]);
-
-	if (!de->cmd_copy_gptr->ptr || cmd_size > de->cmd_copy_gptr->size) {
-		size_t cmd_alloc = round_up_size(cmd_size);
-
-		if (gptr_realloc_new(dev, de->cmd_copy_gptr, cmd_alloc)) {
-			v4l2_err(&dev->v4l2_dev,
-				 "Alloc cmd buffer (%zu): FAILED\n", cmd_alloc);
-			return -ENOMEM;
-		}
-		v4l2_info(&dev->v4l2_dev, "Alloc cmd buffer (%zu): OK\n",
-			  cmd_alloc);
-	}
-
-	memcpy(de->cmd_copy_gptr->ptr, de->cmd_fifo, cmd_size);
+	de->cmd_size = cmd_size;
 	return 0;
 }
 
@@ -1406,6 +1529,12 @@ static void dec_env_delete(struct rpivid_dec_env *const de)
 {
 	struct rpivid_ctx * const ctx = de->ctx;
 	unsigned long lock_flags;
+
+	if (de->cmd_size) {
+		dma_unmap_single(ctx->dev->dev, de->cmd_addr, de->cmd_size,
+				 DMA_TO_DEVICE);
+		de->cmd_size = 0;
+	}
 
 	aux_q_release(ctx, &de->frame_aux);
 	aux_q_release(ctx, &de->col_aux);
@@ -1459,7 +1588,8 @@ static int dec_env_init(struct rpivid_ctx *const ctx)
 
 		de->ctx = ctx;
 		de->decode_order = i;
-		de->cmd_max = 1024;
+//		de->cmd_max = 1024;
+		de->cmd_max = 8096;
 		de->cmd_fifo = kmalloc_array(de->cmd_max,
 					     sizeof(struct rpi_cmd),
 					     GFP_KERNEL);
@@ -1517,22 +1647,24 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 	struct rpivid_dev *const dev = ctx->dev;
 	const struct v4l2_ctrl_hevc_slice_params *const sh =
 						run->h265.slice_params;
-	const struct v4l2_hevc_pred_weight_table *pred_weight_table;
+//	const struct v4l2_hevc_pred_weight_table *pred_weight_table;
 	struct rpivid_q_aux *dpb_q_aux[V4L2_HEVC_DPB_ENTRIES_NUM_MAX];
 	struct rpivid_dec_state *const s = ctx->state;
 	struct vb2_queue *vq;
-	struct rpivid_dec_env *de;
-	int ctb_addr_ts;
+	struct rpivid_dec_env *de = ctx->dec0;
+	unsigned int prev_rs;
 	unsigned int i;
 	int use_aux;
+	int rv;
 	bool slice_temporal_mvp;
 
-	pred_weight_table = &sh->pred_weight_table;
+	xtrace_in(dev, de);
+
+//	pred_weight_table = &sh->pred_weight_table;
 
 	s->frame_end =
 		((run->src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF) == 0);
 
-	de = ctx->dec0;
 	slice_temporal_mvp = (sh->flags &
 		   V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_TEMPORAL_MVP_ENABLED);
 
@@ -1575,7 +1707,9 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 			memcpy(&s->pps, run->h265.pps, sizeof(s->pps));
 
 			/* Recalc stuff as required */
-			updated_ps(s);
+			rv = updated_ps(s);
+			if (rv)
+				goto fail;
 		}
 
 		de = dec_env_new(ctx);
@@ -1600,12 +1734,11 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 		de->cmd_len = 0;
 		de->dpbno_col = ~0U;
 
-		de->bit_copy_gptr = ctx->bitbufs + 0;
+		de->bit_copy_gptr = ctx->bitbufs + ctx->p1idx;
 		de->bit_copy_len = 0;
-		de->cmd_copy_gptr = ctx->cmdbufs + 0;
 
 		de->frame_c_offset = ctx->dst_fmt.height * 128;
-		de->frame_stride = ctx->dst_fmt.bytesperline * 128;
+		de->frame_stride = ctx->dst_fmt.plane_fmt[0].bytesperline * 128;
 		de->frame_addr =
 			vb2_dma_contig_plane_dma_addr(&run->dst->vb2_buf, 0);
 		de->frame_aux = NULL;
@@ -1646,20 +1779,11 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 			goto fail;
 		}
 		if (run->dst->planes[0].length <
-		    ctx->dst_fmt.sizeimage) {
+		    ctx->dst_fmt.plane_fmt[0].sizeimage) {
 			v4l2_warn(&dev->v4l2_dev,
 				  "Capture plane[0] length (%d) < sizeimage (%d)\n",
 				  run->dst->planes[0].length,
-				  ctx->dst_fmt.sizeimage);
-			goto fail;
-		}
-
-		if (s->sps.pic_width_in_luma_samples > 4096 ||
-		    s->sps.pic_height_in_luma_samples > 4096) {
-			v4l2_warn(&dev->v4l2_dev,
-				  "Pic dimension (%dx%d) exeeds 4096\n",
-				  s->sps.pic_width_in_luma_samples,
-				  s->sps.pic_height_in_luma_samples);
+				  ctx->dst_fmt.plane_fmt[0].sizeimage);
 			goto fail;
 		}
 
@@ -1699,20 +1823,10 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 		 * slice as we can use the src buf directly
 		 */
 		if (!s->frame_end && !de->bit_copy_gptr->ptr) {
-			const size_t wxh = s->sps.pic_width_in_luma_samples *
-				s->sps.pic_height_in_luma_samples;
 			size_t bits_alloc;
-
-			/* Annex A gives a min compression of 2 @ lvl 3.1
-			 * (wxh <= 983040) and min 4 thereafter but avoid
-			 * the odity of 983041 having a lower limit than
-			 * 983040.
-			 * Multiply by 3/2 for 4:2:0
-			 */
-			bits_alloc = wxh < 983040 ? wxh * 3 / 4 :
-				wxh < 983040 * 2 ? 983040 * 3 / 4 :
-				wxh * 3 / 8;
-			bits_alloc = round_up_size(bits_alloc);
+			bits_alloc = rpivid_bit_buf_size(s->sps.pic_width_in_luma_samples,
+							 s->sps.pic_height_in_luma_samples,
+							 s->sps.bit_depth_luma_minus8);
 
 			if (gptr_alloc(dev, de->bit_copy_gptr,
 				       bits_alloc,
@@ -1728,18 +1842,35 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 		}
 	}
 
-	// Pre calc a few things
-	s->src_addr =
-		!s->frame_end ?
-			0 :
-			vb2_dma_contig_plane_dma_addr(&run->src->vb2_buf, 0);
-	s->src_buf = s->src_addr != 0 ? NULL :
-					vb2_plane_vaddr(&run->src->vb2_buf, 0);
+	// Either map src buffer or use directly
+	s->src_addr = 0;
+	s->src_buf = NULL;
+
+	if (run->src->planes[0].bytesused < (sh->bit_size + 7) / 8) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "Bit size %d > bytesused %d\n",
+			  sh->bit_size, run->src->planes[0].bytesused);
+		goto fail;
+	}
+	if (sh->data_bit_offset >= sh->bit_size ||
+	    sh->bit_size - sh->data_bit_offset < 8) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "Bit size %d < Bit offset %d + 8\n",
+			  sh->bit_size, sh->data_bit_offset);
+		goto fail;
+	}
+
+	if (s->frame_end)
+		s->src_addr = vb2_dma_contig_plane_dma_addr(&run->src->vb2_buf,
+							    0);
+	if (!s->src_addr)
+		s->src_buf = vb2_plane_vaddr(&run->src->vb2_buf, 0);
 	if (!s->src_addr && !s->src_buf) {
 		v4l2_err(&dev->v4l2_dev, "Failed to map src buffer\n");
 		goto fail;
 	}
 
+	// Pre calc a few things
 	s->sh = sh;
 	s->slice_qp = 26 + s->pps.init_qp_minus26 + s->sh->slice_qp_delta;
 	s->max_num_merge_cand = sh->slice_type == HEVC_SLICE_I ?
@@ -1760,15 +1891,26 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 	if (s->sps.flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED)
 		populate_scaling_factors(run, de, s);
 
-	ctb_addr_ts = s->ctb_addr_rs_to_ts[sh->slice_segment_addr];
+	// Calc all the random coord info to avoid repeated conversion in/out
+	s->start_ts = s->ctb_addr_rs_to_ts[sh->slice_segment_addr];
+	s->start_ctb_x = sh->slice_segment_addr % de->pic_width_in_ctbs_y;
+	s->start_ctb_y = sh->slice_segment_addr / de->pic_width_in_ctbs_y;
+	// Last CTB of previous slice
+	prev_rs = !s->start_ts ? 0 : s->ctb_addr_ts_to_rs[s->start_ts - 1];
+	s->prev_ctb_x = prev_rs % de->pic_width_in_ctbs_y;
+	s->prev_ctb_y = prev_rs / de->pic_width_in_ctbs_y;
 
 	if ((s->pps.flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED))
-		wpp_decode_slice(de, s, sh, ctb_addr_ts);
+		rv = wpp_decode_slice(de, s);
 	else
-		decode_slice(de, s, sh, ctb_addr_ts);
+		rv = decode_slice(de, s);
+	if (rv)
+		goto fail;
 
-	if (!s->frame_end)
+	if (!s->frame_end) {
+		xtrace_ok(dev, de);
 		return;
+	}
 
 	// Frame end
 	memset(dpb_q_aux, 0,
@@ -1776,8 +1918,9 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 	/*
 	 * Need Aux ents for all (ref) DPB ents if temporal MV could
 	 * be enabled for any pic
-	 * ** At the moment we have aux ents for all pics whether or not
-	 *    they are ref
+	 * ** At the moment we create aux ents for all pics whether or not
+	 *    they are ref - they should then be discarded by the DPB-aux
+	 *    garbage collection code
 	 */
 	use_aux = ((s->sps.flags &
 		  V4L2_HEVC_SPS_FLAG_SPS_TEMPORAL_MVP_ENABLED) != 0);
@@ -1787,7 +1930,8 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 	// slices. If this changes we will need idx mapping code.
 	// Uses sh so here rather than trigger
 
-	vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE);
+	vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx,
+			     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 
 	if (!vq) {
 		v4l2_err(&dev->v4l2_dev, "VQ gone!\n");
@@ -1795,7 +1939,7 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 	}
 
 	//        v4l2_info(&dev->v4l2_dev, "rpivid_h265_end of frame\n");
-	if (frame_end(dev, de, s))
+	if (write_cmd_buffer(dev, de, s))
 		goto fail;
 
 	for (i = 0; i < sh->num_active_dpb_entries; ++i) {
@@ -1876,6 +2020,7 @@ static void rpivid_h265_setup(struct rpivid_ctx *ctx, struct rpivid_run *run)
 	}
 
 	de->state = RPIVID_DECODE_PHASE1;
+	xtrace_ok(dev, de);
 	return;
 
 fail:
@@ -1883,6 +2028,7 @@ fail:
 		// Actual error reporting happens in Trigger
 		de->state = s->frame_end ? RPIVID_DECODE_ERROR_DONE :
 					   RPIVID_DECODE_ERROR_CONTINUE;
+	xtrace_fail(dev, de);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1917,29 +2063,28 @@ static int check_status(const struct rpivid_dev *const dev)
 	return -1;
 }
 
-static void cb_phase2(struct rpivid_dev *const dev, void *v)
+static void phase2_cb(struct rpivid_dev *const dev, void *v)
 {
 	struct rpivid_dec_env *const de = v;
-	struct rpivid_ctx *const ctx = de->ctx;
 
 	xtrace_in(dev, de);
 
-	v4l2_m2m_cap_buf_return(dev->m2m_dev, ctx->fh.m2m_ctx, de->frame_buf,
-				VB2_BUF_STATE_DONE);
+	/* Done with buffers - allow new P1 */
+	rpivid_hw_irq_active1_enable_claim(dev, 1);
+
+	v4l2_m2m_buf_done(de->frame_buf, VB2_BUF_STATE_DONE);
 	de->frame_buf = NULL;
 
-	/* Delete de before finish as finish might immediately trigger a reuse
-	 * of de
-	 */
-	dec_env_delete(de);
-
-	if (atomic_add_return(-1, &ctx->p2out) >= RPIVID_P2BUF_COUNT - 1) {
-		xtrace_fin(dev, de);
-		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx,
-						 VB2_BUF_STATE_DONE);
-	}
+#if USE_REQUEST_PIN
+	media_request_unpin(de->req_pin);
+	de->req_pin = NULL;
+#else
+	media_request_object_complete(de->req_obj);
+	de->req_obj = NULL;
+#endif
 
 	xtrace_ok(dev, de);
+	dec_env_delete(de);
 }
 
 static void phase2_claimed(struct rpivid_dev *const dev, void *v)
@@ -1995,7 +2140,7 @@ static void phase2_claimed(struct rpivid_dev *const dev, void *v)
 	//	   de->ctx->colmvbuf.addr, de->ctx->colmvbuf.addr +
 	//	   de->ctx->colmvbuf.size);
 
-	rpivid_hw_irq_active2_irq(dev, &de->irq_ent, cb_phase2, de);
+	rpivid_hw_irq_active2_irq(dev, &de->irq_ent, phase2_cb, de);
 
 	apb_write_final(dev, RPI_NUMROWS, de->pic_height_in_ctbs_y);
 
@@ -2003,6 +2148,39 @@ static void phase2_claimed(struct rpivid_dev *const dev, void *v)
 }
 
 static void phase1_claimed(struct rpivid_dev *const dev, void *v);
+
+// release any and all objects associated with de
+// and reenable phase 1 if required
+static void phase1_err_fin(struct rpivid_dev *const dev,
+			   struct rpivid_ctx *const ctx,
+			   struct rpivid_dec_env *const de)
+{
+	/* Return all detached buffers */
+	if (de->src_buf)
+		v4l2_m2m_buf_done(de->src_buf, VB2_BUF_STATE_ERROR);
+	de->src_buf = NULL;
+	if (de->frame_buf)
+		v4l2_m2m_buf_done(de->frame_buf, VB2_BUF_STATE_ERROR);
+	de->frame_buf = NULL;
+#if USE_REQUEST_PIN
+	if (de->req_pin)
+		media_request_unpin(de->req_pin);
+	de->req_pin = NULL;
+#else
+	if (de->req_obj)
+		media_request_object_complete(de->req_obj);
+	de->req_obj = NULL;
+#endif
+
+	dec_env_delete(de);
+
+	/* Reenable phase 0 if we were blocking */
+	if (atomic_add_return(-1, &ctx->p1out) >= RPIVID_P1BUF_COUNT - 1)
+		v4l2_m2m_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx);
+
+	/* Done with P1-P2 buffers - allow new P1 */
+	rpivid_hw_irq_active1_enable_claim(dev, 1);
+}
 
 static void phase1_thread(struct rpivid_dev *const dev, void *v)
 {
@@ -2048,15 +2226,12 @@ fail:
 			 __func__);
 		ctx->fatal_err = 1;
 	}
-	dec_env_delete(de);
-	xtrace_fin(dev, de);
-	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx,
-					 VB2_BUF_STATE_ERROR);
 	xtrace_fail(dev, de);
+	phase1_err_fin(dev, ctx, de);
 }
 
 /* Always called in irq context (this is good) */
-static void cb_phase1(struct rpivid_dev *const dev, void *v)
+static void phase1_cb(struct rpivid_dev *const dev, void *v)
 {
 	struct rpivid_dec_env *const de = v;
 	struct rpivid_ctx *const ctx = de->ctx;
@@ -2064,6 +2239,7 @@ static void cb_phase1(struct rpivid_dev *const dev, void *v)
 	xtrace_in(dev, de);
 
 	de->p1_status = check_status(dev);
+
 	if (de->p1_status != 0) {
 		v4l2_info(&dev->v4l2_dev, "%s: Post wait: %#x\n",
 			  __func__, de->p1_status);
@@ -2077,24 +2253,17 @@ static void cb_phase1(struct rpivid_dev *const dev, void *v)
 		return;
 	}
 
-	/* After the frame-buf is detached it must be returned but from
-	 * this point onward (phase2_claimed, cb_phase2) there are no error
-	 * paths so the return at the end of cb_phase2 is all that is needed
-	 */
-	de->frame_buf = v4l2_m2m_cap_buf_detach(dev->m2m_dev, ctx->fh.m2m_ctx);
-	if (!de->frame_buf) {
-		v4l2_err(&dev->v4l2_dev, "%s: No detached buffer\n", __func__);
-		goto fail;
-	}
+	v4l2_m2m_buf_done(de->src_buf, VB2_BUF_STATE_DONE);
+	de->src_buf = NULL;
 
+	/* All phase1 error paths done - it is safe to inc p2idx */
 	ctx->p2idx =
 		(ctx->p2idx + 1 >= RPIVID_P2BUF_COUNT) ? 0 : ctx->p2idx + 1;
 
-	// Enable the next setup if our Q isn't too big
-	if (atomic_add_return(1, &ctx->p2out) < RPIVID_P2BUF_COUNT) {
+	/* Renable the next setup if we were blocking */
+	if (atomic_add_return(-1, &ctx->p1out) >= RPIVID_P1BUF_COUNT - 1) {
 		xtrace_fin(dev, de);
-		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx,
-						 VB2_BUF_STATE_DONE);
+		v4l2_m2m_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx);
 	}
 
 	rpivid_hw_irq_active2_claim(dev, &de->irq_ent, phase2_claimed, de);
@@ -2103,11 +2272,8 @@ static void cb_phase1(struct rpivid_dev *const dev, void *v)
 	return;
 
 fail:
-	dec_env_delete(de);
-	xtrace_fin(dev, de);
-	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx,
-					 VB2_BUF_STATE_ERROR);
 	xtrace_fail(dev, de);
+	phase1_err_fin(dev, ctx, de);
 }
 
 static void phase1_claimed(struct rpivid_dev *const dev, void *v)
@@ -2132,6 +2298,10 @@ static void phase1_claimed(struct rpivid_dev *const dev, void *v)
 	de->coeff_stride =
 		ALIGN_DOWN(coeff_gptr->size / de->pic_height_in_ctbs_y, 64);
 
+	/* phase1_claimed blocked until cb_phase1 completed so p2idx inc
+	 * in cb_phase1 after error detection
+	 */
+
 	apb_write_vc_addr(dev, RPI_PUWBASE, de->pu_base_vc);
 	apb_write_vc_len(dev, RPI_PUWSTRIDE, de->pu_stride);
 	apb_write_vc_addr(dev, RPI_COEFFWBASE, de->coeff_base_vc);
@@ -2141,20 +2311,17 @@ static void phase1_claimed(struct rpivid_dev *const dev, void *v)
 	apb_write(dev, RPI_CFNUM, de->cmd_len);
 
 	// Claim irq
-	rpivid_hw_irq_active1_irq(dev, &de->irq_ent, cb_phase1, de);
+	rpivid_hw_irq_active1_irq(dev, &de->irq_ent, phase1_cb, de);
 
 	// And start the h/w
-	apb_write_vc_addr_final(dev, RPI_CFBASE, de->cmd_copy_gptr->addr);
+	apb_write_vc_addr_final(dev, RPI_CFBASE, de->cmd_addr);
 
 	xtrace_ok(dev, de);
 	return;
 
 fail:
-	dec_env_delete(de);
-	xtrace_fin(dev, de);
-	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx,
-					 VB2_BUF_STATE_ERROR);
 	xtrace_fail(dev, de);
+	phase1_err_fin(dev, ctx, de);
 }
 
 static void dec_state_delete(struct rpivid_ctx *const ctx)
@@ -2191,8 +2358,6 @@ static void rpivid_h265_stop(struct rpivid_ctx *ctx)
 
 	for (i = 0; i != ARRAY_SIZE(ctx->bitbufs); ++i)
 		gptr_free(dev, ctx->bitbufs + i);
-	for (i = 0; i != ARRAY_SIZE(ctx->cmdbufs); ++i)
-		gptr_free(dev, ctx->cmdbufs + i);
 	for (i = 0; i != ARRAY_SIZE(ctx->pu_bufs); ++i)
 		gptr_free(dev, ctx->pu_bufs + i);
 	for (i = 0; i != ARRAY_SIZE(ctx->coeff_bufs); ++i)
@@ -2209,6 +2374,10 @@ static int rpivid_h265_start(struct rpivid_ctx *ctx)
 	unsigned int wxh;
 	size_t pu_alloc;
 	size_t coeff_alloc;
+
+#if DEBUG_TRACE_P1_CMD
+	p1_z = 0;
+#endif
 
 	// Generate a sanitised WxH for memory alloc
 	// Assume HD if unset
@@ -2238,26 +2407,17 @@ static int rpivid_h265_start(struct rpivid_ctx *ctx)
 		goto fail;
 	}
 
-	// 16k is plenty for most purposes but we will realloc if needed
-	for (i = 0; i != ARRAY_SIZE(ctx->cmdbufs); ++i) {
-		if (gptr_alloc(dev, ctx->cmdbufs + i, 0x4000,
-			       DMA_ATTR_FORCE_CONTIGUOUS))
-			goto fail;
-	}
-
 	// Finger in the air PU & Coeff alloc
 	// Will be realloced if too small
-	coeff_alloc = round_up_size(wxh);
-	pu_alloc = round_up_size(wxh / 4);
+	coeff_alloc = rpivid_round_up_size(wxh);
+	pu_alloc = rpivid_round_up_size(wxh / 4);
 	for (i = 0; i != ARRAY_SIZE(ctx->pu_bufs); ++i) {
 		// Don't actually need a kernel mapping here
 		if (gptr_alloc(dev, ctx->pu_bufs + i, pu_alloc,
-			       DMA_ATTR_FORCE_CONTIGUOUS |
-					DMA_ATTR_NO_KERNEL_MAPPING))
+			       DMA_ATTR_NO_KERNEL_MAPPING))
 			goto fail;
 		if (gptr_alloc(dev, ctx->coeff_bufs + i, coeff_alloc,
-			       DMA_ATTR_FORCE_CONTIGUOUS |
-					DMA_ATTR_NO_KERNEL_MAPPING))
+			       DMA_ATTR_NO_KERNEL_MAPPING))
 			goto fail;
 	}
 	aux_q_init(ctx);
@@ -2283,7 +2443,9 @@ static void rpivid_h265_trigger(struct rpivid_ctx *ctx)
 	case RPIVID_DECODE_SLICE_CONTINUE:
 		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_DONE);
+		xtrace_ok(dev, de);
 		break;
+
 	default:
 		v4l2_err(&dev->v4l2_dev, "%s: Unexpected state: %d\n", __func__,
 			 de->state);
@@ -2297,19 +2459,159 @@ static void rpivid_h265_trigger(struct rpivid_ctx *ctx)
 		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_ERROR);
 		break;
+
 	case RPIVID_DECODE_PHASE1:
 		ctx->dec0 = NULL;
+
+#if !USE_REQUEST_PIN
+		/* Alloc a new request object - needs to be alloced dynamically
+		 * as the media request will release it some random time after
+		 * it is completed
+		 */
+		de->req_obj = kmalloc(sizeof(*de->req_obj), GFP_KERNEL);
+		if (!de->req_obj) {
+			xtrace_fail(dev, de);
+			dec_env_delete(de);
+			v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev,
+							 ctx->fh.m2m_ctx,
+							 VB2_BUF_STATE_ERROR);
+			break;
+		}
+		media_request_object_init(de->req_obj);
+#warning probably needs to _get the req obj too
+#endif
+		ctx->p1idx = (ctx->p1idx + 1 >= RPIVID_P1BUF_COUNT) ?
+							0 : ctx->p1idx + 1;
+
+		/* We know we have src & dst so no need to test */
+		de->src_buf = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
+		de->frame_buf = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
+
+#if USE_REQUEST_PIN
+		de->req_pin = de->src_buf->vb2_buf.req_obj.req;
+		media_request_pin(de->req_pin);
+#else
+		media_request_object_bind(de->src_buf->vb2_buf.req_obj.req,
+					  &dst_req_obj_ops, de, false,
+					  de->req_obj);
+#endif
+
+		/* We could get rid of the src buffer here if we've already
+		 * copied it, but we don't copy the last buffer unless it
+		 * didn't return a contig dma addr and that shouldn't happen
+		 */
+
+		/* Enable the next setup if our Q isn't too big */
+		if (atomic_add_return(1, &ctx->p1out) < RPIVID_P1BUF_COUNT) {
+			xtrace_fin(dev, de);
+			v4l2_m2m_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx);
+		}
+
 		rpivid_hw_irq_active1_claim(dev, &de->irq_ent, phase1_claimed,
 					    de);
+		xtrace_ok(dev, de);
 		break;
 	}
-
-	xtrace_ok(dev, de);
 }
 
-struct rpivid_dec_ops rpivid_dec_ops_h265 = {
+const struct rpivid_dec_ops rpivid_dec_ops_h265 = {
 	.setup = rpivid_h265_setup,
 	.start = rpivid_h265_start,
 	.stop = rpivid_h265_stop,
 	.trigger = rpivid_h265_trigger,
 };
+
+static int try_ctrl_sps(struct v4l2_ctrl *ctrl)
+{
+	const struct v4l2_ctrl_hevc_sps *const sps = ctrl->p_new.p_hevc_sps;
+	struct rpivid_ctx *const ctx = ctrl->priv;
+	struct rpivid_dev *const dev = ctx->dev;
+
+	if (sps->chroma_format_idc != 1) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "Chroma format (%d) unsupported\n",
+			  sps->chroma_format_idc);
+		return -EINVAL;
+	}
+
+	if (sps->bit_depth_luma_minus8 != 0 &&
+	    sps->bit_depth_luma_minus8 != 2) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "Luma depth (%d) unsupported\n",
+			  sps->bit_depth_luma_minus8 + 8);
+		return -EINVAL;
+	}
+
+	if (sps->bit_depth_luma_minus8 != sps->bit_depth_chroma_minus8) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "Chroma depth (%d) != Luma depth (%d)\n",
+			  sps->bit_depth_chroma_minus8 + 8,
+			  sps->bit_depth_luma_minus8 + 8);
+		return -EINVAL;
+	}
+
+	if (!sps->pic_width_in_luma_samples ||
+	    !sps->pic_height_in_luma_samples ||
+	    sps->pic_width_in_luma_samples > 4096 ||
+	    sps->pic_height_in_luma_samples > 4096) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "Bad sps width (%u) x height (%u)\n",
+			  sps->pic_width_in_luma_samples,
+			  sps->pic_height_in_luma_samples);
+		return -EINVAL;
+	}
+
+	if (!ctx->dst_fmt_set)
+		return 0;
+
+	if ((sps->bit_depth_luma_minus8 == 0 &&
+	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12_COL128) ||
+	    (sps->bit_depth_luma_minus8 == 2 &&
+	     ctx->dst_fmt.pixelformat != V4L2_PIX_FMT_NV12_10_COL128)) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "SPS luma depth %d does not match capture format\n",
+			  sps->bit_depth_luma_minus8 + 8);
+		return -EINVAL;
+	}
+
+	if (sps->pic_width_in_luma_samples > ctx->dst_fmt.width ||
+	    sps->pic_height_in_luma_samples > ctx->dst_fmt.height) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "SPS size (%dx%d) > capture size (%d,%d)\n",
+			  sps->pic_width_in_luma_samples,
+			  sps->pic_height_in_luma_samples,
+			  ctx->dst_fmt.width,
+			  ctx->dst_fmt.height);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+const struct v4l2_ctrl_ops rpivid_hevc_sps_ctrl_ops = {
+	.try_ctrl = try_ctrl_sps,
+};
+
+static int try_ctrl_pps(struct v4l2_ctrl *ctrl)
+{
+	const struct v4l2_ctrl_hevc_pps *const pps = ctrl->p_new.p_hevc_pps;
+	struct rpivid_ctx *const ctx = ctrl->priv;
+	struct rpivid_dev *const dev = ctx->dev;
+
+	if ((pps->flags &
+	     V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED) &&
+	    (pps->flags &
+	     V4L2_HEVC_PPS_FLAG_TILES_ENABLED) &&
+	    (pps->num_tile_columns_minus1 || pps->num_tile_rows_minus1)) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "WPP + Tiles not supported\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+const struct v4l2_ctrl_ops rpivid_hevc_pps_ctrl_ops = {
+	.try_ctrl = try_ctrl_pps,
+};
+
