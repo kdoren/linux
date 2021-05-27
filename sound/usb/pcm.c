@@ -280,7 +280,10 @@ static int snd_usb_pcm_sync_stop(struct snd_pcm_substream *substream)
 {
 	struct snd_usb_substream *subs = substream->runtime->private_data;
 
-	sync_pending_stops(subs);
+	if (!snd_usb_lock_shutdown(subs->stream->chip)) {
+		sync_pending_stops(subs);
+		snd_usb_unlock_shutdown(subs->stream->chip);
+	}
 	return 0;
 }
 
@@ -382,6 +385,14 @@ static int set_sync_ep_implicit_fb_quirk(struct snd_usb_substream *subs,
 		ep = 0x82;
 		ifnum = 0;
 		goto add_sync_ep_from_ifnum;
+	case USB_ID(0x1235, 0x8210): /* Focusrite Scarlett 2i2 3rd Gen */
+	case USB_ID(0x1235, 0x8212): /* Focusrite Scarlett 4i4 3rd Gen */
+	case USB_ID(0x1235, 0x8213): /* Focusrite Scarlett 8i6 3rd Gen */
+	case USB_ID(0x1235, 0x8214): /* Focusrite Scarlett 18i8 3rd Gen */
+	case USB_ID(0x1235, 0x8215): /* Focusrite Scarlett 18i20 3rd Gen */
+		ep = 0x81;
+		ifnum = 2;
+		goto add_sync_ep_from_ifnum;
 	case USB_ID(0x0582, 0x01d8): /* BOSS Katana */
 		/* BOSS Katana amplifiers do not need quirks */
 		return 0;
@@ -404,10 +415,11 @@ static int set_sync_ep_implicit_fb_quirk(struct snd_usb_substream *subs,
 add_sync_ep_from_ifnum:
 	iface = usb_ifnum_to_if(dev, ifnum);
 
-	if (!iface || iface->num_altsetting < 2)
-		return -EINVAL;
+	if (!iface || iface->num_altsetting < 2 ||
+	    altsd->bAlternateSetting >= iface->num_altsetting)
+	return -EINVAL;
 
-	alts = &iface->altsetting[1];
+	alts = usb_altnum_to_altsetting(iface, altsd->bAlternateSetting);
 
 add_sync_ep:
 	subs->sync_endpoint = snd_usb_add_endpoint(subs->stream->chip,
@@ -1858,7 +1870,7 @@ void snd_usb_preallocate_buffer(struct snd_usb_substream *subs)
 {
 	struct snd_pcm *pcm = subs->stream->pcm;
 	struct snd_pcm_substream *s = pcm->streams[subs->direction].substream;
-	struct device *dev = subs->dev->bus->sysdev;
+	struct device *dev = subs->dev->bus->controller;
 
 	if (snd_usb_use_vmalloc)
 		snd_pcm_set_managed_buffer(s, SNDRV_DMA_TYPE_VMALLOC,

@@ -50,7 +50,7 @@
 #include "mixer_quirks.h"
 #include "power.h"
 
-#define MAX_ID_ELEMS	256
+#define MAX_ID_ELEMS	1024
 
 struct usb_audio_term {
 	int id;
@@ -1300,17 +1300,6 @@ no_res_check:
 		if (cval->dBmin > cval->dBmax) {
 			/* totally crap, return an error */
 			return -EINVAL;
-		}
-	} else {
-		/* if the max volume is too low, it's likely a bogus range;
-		 * here we use -96dB as the threshold
-		 */
-		if (cval->dBmax <= -9600) {
-			usb_audio_info(cval->head.mixer->chip,
-				       "%d:%d: bogus dB values (%d/%d), disabling dB reporting\n",
-				       cval->head.id, mixer_ctrl_intf(cval->head.mixer),
-				       cval->dBmin, cval->dBmax);
-			cval->dBmin = cval->dBmax = 0;
 		}
 	}
 
