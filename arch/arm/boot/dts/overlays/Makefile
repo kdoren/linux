@@ -156,6 +156,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	rpi-display.dtbo \
 	rpi-ft5406.dtbo \
 	rpi-poe.dtbo \
+	rpi-poe-plus.dtbo \
 	rpi-proto.dtbo \
 	rpi-sense.dtbo \
 	rpi-tv.dtbo \
@@ -195,6 +196,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	spi6-2cs.dtbo \
 	ssd1306.dtbo \
 	ssd1306-spi.dtbo \
+	ssd1331-spi.dtbo \
 	ssd1351-spi.dtbo \
 	superaudioboard.dtbo \
 	sx150x.dtbo \
