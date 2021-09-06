@@ -628,9 +628,9 @@ Load:   dtoverlay=cap1106,<param>=<val>
 Params: int_pin                 GPIO pin for interrupt signal (default 23)
 
 
-Name:   chipdip-i2s-master-dac
-Info:   Configures Raspberry PI to work as I2S slave with BCLK=64Fs.
-Load:   dtoverlay=chipdip-i2s-master-dac
+Name:   chipdip-dac
+Info:   Configures Chip Dip audio cards.
+Load:   dtoverlay=chipdip-dac
 Params: <None>
 
 
@@ -1390,6 +1390,8 @@ Params: abx80x                  Select one of the ABx80x family:
                                   AB0801, AB0803, AB0804, AB0805,
                                   AB1801, AB1803, AB1804, AB1805
 
+        bq32000                 Select the TI BQ32000 device
+
         ds1307                  Select the DS1307 device
 
         ds1339                  Select the DS1339 device
@@ -1424,6 +1426,8 @@ Params: abx80x                  Select one of the ABx80x family:
 
         sd3078                  Select the ZXW Shenzhen whwave SD3078 device
 
+        s35390a                 Select the ABLIC S35390A device
+
         i2c0                    Choose the I2C0 bus on GPIOs 0&1
 
         i2c_csi_dsi             Choose the I2C0 bus on GPIOs 44&45
@@ -1431,6 +1435,9 @@ Params: abx80x                  Select one of the ABx80x family:
         addr                    Sets the address for the RTC. Note that the
                                 device must be configured to use the specified
                                 address.
+
+        trickle-diode-disable   Do not use the internal trickle charger diode
+                                (BQ32000 only)
 
         trickle-diode-type      Diode type for trickle charge - "standard" or
                                 "schottky" (ABx80x and RV1805 only)
@@ -1453,6 +1460,8 @@ Params: abx80x                  Select one of the ABx80x family:
                                   AB0801, AB0803, AB0804, AB0805,
                                   AB1801, AB1803, AB1804, AB1805
 
+        bq32000                 Select the TI BQ32000 device
+
         ds1307                  Select the DS1307 device
 
         ds1339                  Select the DS1339 device
@@ -1487,9 +1496,14 @@ Params: abx80x                  Select one of the ABx80x family:
 
         sd3078                  Select the ZXW Shenzhen whwave SD3078 device
 
+        s35390a                 Select the ABLIC S35390A device
+
         addr                    Sets the address for the RTC. Note that the
                                 device must be configured to use the specified
                                 address.
+
+        trickle-diode-disable   Do not use the internal trickle charger diode
+                                (BQ32000 only)
 
         trickle-diode-type      Diode type for trickle charge - "standard" or
                                 "schottky" (ABx80x and RV1805 only)
@@ -1678,6 +1692,8 @@ Info:   Sony IMX219 camera module.
 Load:   dtoverlay=imx219,<param>=<val>
 Params: rotation                Mounting rotation of the camera sensor (0 or
                                 180, default 180)
+        orientation             Sensor orientation (0 = front, 1 = rear,
+                                2 = external, default external)
 
 
 Name:   imx290
@@ -1694,6 +1710,10 @@ Params: 4lane                   Enable 4 CSI2 lanes. This requires a Compute
                                 (the default), whilst those from Innomaker use
                                 74.25MHz.
         mono                    Denote that the module is a mono sensor.
+        orientation             Sensor orientation (0 = front, 1 = rear,
+                                2 = external, default external)
+        rotation                Mounting rotation of the camera sensor (0 or
+                                180, default 0)
 
 
 Name:   imx378
@@ -1703,6 +1723,8 @@ Info:   Sony IMX378 camera module.
 Load:   dtoverlay=imx378,<param>=<val>
 Params: rotation                Mounting rotation of the camera sensor (0 or
                                 180, default 180)
+        orientation             Sensor orientation (0 = front, 1 = rear,
+                                2 = external, default external)
 
 
 Name:   imx477
@@ -1712,6 +1734,8 @@ Info:   Sony IMX477 camera module.
 Load:   dtoverlay=imx477,<param>=<val>
 Params: rotation                Mounting rotation of the camera sensor (0 or
                                 180, default 180)
+        orientation             Sensor orientation (0 = front, 1 = rear,
+                                2 = external, default external)
 
 
 Name:   iqaudio-codec
@@ -2074,6 +2098,34 @@ Load:   dtoverlay=midi-uart1
 Params: <None>
 
 
+Name:   midi-uart2
+Info:   Configures UART2 (ttyAMA1) so that a requested 38.4kbaud actually gets
+        31.25kbaud, the frequency required for MIDI
+Load:   dtoverlay=midi-uart2
+Params: <None>
+
+
+Name:   midi-uart3
+Info:   Configures UART3 (ttyAMA2) so that a requested 38.4kbaud actually gets
+        31.25kbaud, the frequency required for MIDI
+Load:   dtoverlay=midi-uart3
+Params: <None>
+
+
+Name:   midi-uart4
+Info:   Configures UART4 (ttyAMA3) so that a requested 38.4kbaud actually gets
+        31.25kbaud, the frequency required for MIDI
+Load:   dtoverlay=midi-uart4
+Params: <None>
+
+
+Name:   midi-uart5
+Info:   Configures UART5 (ttyAMA4) so that a requested 38.4kbaud actually gets
+        31.25kbaud, the frequency required for MIDI
+Load:   dtoverlay=midi-uart5
+Params: <None>
+
+
 Name:   minipitft13
 Info:   Overlay for AdaFruit Mini Pi 1.3" TFT via SPI using fbtft driver.
 Load:   dtoverlay=minipitft13,<param>=<val>
@@ -2137,22 +2189,30 @@ Info:   Omnivision OV5647 camera module.
 Load:   dtoverlay=ov5647,<param>=<val>
 Params: rotation                Mounting rotation of the camera sensor (0 or
                                 180, default 0)
+        orientation             Sensor orientation (0 = front, 1 = rear,
+                                2 = external, default external)
 
 
 Name:   ov7251
 Info:   Omnivision OV7251 camera module.
         Uses Unicam 1, which is the standard camera connector on most Pi
         variants.
-Load:   dtoverlay=ov7251
-Params: <None>
+Load:   dtoverlay=ov7251,<param>=<val>
+Params: rotation                Mounting rotation of the camera sensor (0 or
+                                180, default 0)
+        orientation             Sensor orientation (0 = front, 1 = rear,
+                                2 = external, default external)
 
 
 Name:   ov9281
 Info:   Omnivision OV9281 camera module.
         Uses Unicam 1, which is the standard camera connector on most Pi
         variants.
-Load:   dtoverlay=ov9281
-Params: <None>
+Load:   dtoverlay=ov9281,<param>=<val>
+Params: rotation                Mounting rotation of the camera sensor (0 or
+                                180, default 0)
+        orientation             Sensor orientation (0 = front, 1 = rear,
+                                2 = external, default external)
 
 
 Name:   papirus
@@ -2444,11 +2504,22 @@ Params: gpio_pin                Output GPIO (default 18)
 
 
 Name:   qca7000
-Info:   I2SE's Evaluation Board for PLC Stamp micro
+Info:   in-tech's Evaluation Board for PLC Stamp micro
+        This uses spi0 and a separate GPIO interrupt to connect the QCA7000.
 Load:   dtoverlay=qca7000,<param>=<val>
 Params: int_pin                 GPIO pin for interrupt signal (default 23)
 
         speed                   SPI bus speed (default 12 MHz)
+
+
+Name:   qca7000-uart0
+Info:   in-tech's Evaluation Board for PLC Stamp micro (UART)
+        This uses uart0/ttyAMA0 over GPIOs 14 & 15 to connect the QCA7000.
+        But it requires disabling of onboard Bluetooth on
+        Pi 3B, 3B+, 3A+, 4B and Zero W.
+Load:   dtoverlay=qca7000-uart0,<param>=<val>
+Params: baudrate                Set the baudrate for the UART (default
+                                "115200")
 
 
 Name:   rotary-encoder
@@ -3255,6 +3326,23 @@ Name:   vc4-fkms-v3d
 Info:   Enable Eric Anholt's DRM VC4 V3D driver on top of the dispmanx
         display stack.
 Load:   dtoverlay=vc4-fkms-v3d,<param>
+Params: cma-512                 CMA is 512MB (needs 1GB)
+        cma-448                 CMA is 448MB (needs 1GB)
+        cma-384                 CMA is 384MB (needs 1GB)
+        cma-320                 CMA is 320MB (needs 1GB)
+        cma-256                 CMA is 256MB (needs 1GB)
+        cma-192                 CMA is 192MB (needs 1GB)
+        cma-128                 CMA is 128MB
+        cma-96                  CMA is 96MB
+        cma-64                  CMA is 64MB
+        cma-size                CMA size in bytes, 4MB aligned
+        cma-default             Use upstream's default value
+
+
+Name:   vc4-fkms-v3d-pi4
+Info:   Enable Eric Anholt's DRM VC4 V3D driver on top of the dispmanx
+        display stack.
+Load:   dtoverlay=vc4-fkms-v3d-pi4,<param>
 Params: cma-512                 CMA is 512MB (needs 1GB)
         cma-448                 CMA is 448MB (needs 1GB)
         cma-384                 CMA is 384MB (needs 1GB)

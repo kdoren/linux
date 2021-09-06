@@ -31,7 +31,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	audremap.dtbo \
 	balena-fin.dtbo \
 	cap1106.dtbo \
-	chipdip-i2s-master-dac.dtbo \
+	chipdip-dac.dtbo \
 	cma.dtbo \
 	dht11.dtbo \
 	dionaudio-loco.dtbo \
@@ -123,6 +123,10 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	merus-amp.dtbo \
 	midi-uart0.dtbo \
 	midi-uart1.dtbo \
+	midi-uart2.dtbo \
+	midi-uart3.dtbo \
+	midi-uart4.dtbo \
+	midi-uart5.dtbo \
 	minipitft13.dtbo \
 	miniuart-bt.dtbo \
 	mmc.dtbo \
@@ -153,6 +157,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	pwm-2chan.dtbo \
 	pwm-ir-tx.dtbo \
 	qca7000.dtbo \
+	qca7000-uart0.dtbo \
 	rotary-encoder.dtbo \
 	rpi-backlight.dtbo \
 	rpi-cirrus-wm5102.dtbo \
@@ -220,6 +225,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	upstream.dtbo \
 	upstream-pi4.dtbo \
 	vc4-fkms-v3d.dtbo \
+	vc4-fkms-v3d-pi4.dtbo \
 	vc4-kms-dpi-at056tn53v1.dtbo \
 	vc4-kms-dsi-7inch.dtbo \
 	vc4-kms-dsi-lt070me05000.dtbo \
