@@ -951,6 +951,7 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
 
 	init_data.asic_id.pci_revision_id = adev->pdev->revision;
 	init_data.asic_id.hw_internal_rev = adev->external_rev_id;
+	init_data.asic_id.chip_id = adev->pdev->device;
 
 	init_data.asic_id.vram_width = adev->gmc.vram_width;
 	/* TODO: initialize init_data.asic_id.vram_type here!!!! */
@@ -7754,7 +7755,7 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_state *state)
 			      dm_old_crtc_state->abm_level;
 
 		hdr_changed =
-			is_hdr_metadata_different(old_con_state, new_con_state);
+			!drm_connector_atomic_hdr_metadata_equal(old_con_state, new_con_state);
 
 		if (!scaling_changed && !abm_changed && !hdr_changed)
 			continue;
@@ -8942,7 +8943,8 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 			goto fail;
 		status = dc_validate_global_state(dc, dm_state->context, false);
 		if (status != DC_OK) {
-			DC_LOG_WARNING("DC global validation failure: %s (%d)",
+			drm_dbg_atomic(dev,
+				       "DC global validation failure: %s (%d)",
 				       dc_status_to_str(status), status);
 			ret = -EINVAL;
 			goto fail;

@@ -4,6 +4,7 @@ dtb-$(CONFIG_ARCH_BCM2835) += overlay_map.dtb
 
 dtbo-$(CONFIG_ARCH_BCM2835) += \
 	act-led.dtbo \
+	adafruit-st7735r.dtbo \
 	adafruit18.dtbo \
 	adau1977-adc.dtbo \
 	adau7002-simple.dtbo \
@@ -98,6 +99,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	imx290.dtbo \
 	imx378.dtbo \
 	imx477.dtbo \
+	imx519.dtbo \
 	iqaudio-codec.dtbo \
 	iqaudio-dac.dtbo \
 	iqaudio-dacplus.dtbo \
@@ -113,6 +115,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	mbed-dac.dtbo \
 	mcp23017.dtbo \
 	mcp23s17.dtbo \
+	mcp2515.dtbo \
 	mcp2515-can0.dtbo \
 	mcp2515-can1.dtbo \
 	mcp251xfd.dtbo \
@@ -129,6 +132,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	midi-uart5.dtbo \
 	minipitft13.dtbo \
 	miniuart-bt.dtbo \
+	mlx90640.dtbo \
 	mmc.dtbo \
 	mpu6050.dtbo \
 	mz61581.dtbo \

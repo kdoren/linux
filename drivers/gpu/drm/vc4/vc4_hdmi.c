@@ -80,6 +80,9 @@
 #define VC5_HDMI_VERTB_VSPO_SHIFT		16
 #define VC5_HDMI_VERTB_VSPO_MASK		VC4_MASK(29, 16)
 
+#define VC5_HDMI_MISC_CONTROL_PIXEL_REP_SHIFT	0
+#define VC5_HDMI_MISC_CONTROL_PIXEL_REP_MASK	VC4_MASK(3, 0)
+
 #define VC5_HDMI_SCRAMBLER_CTL_ENABLE		BIT(0)
 
 #define VC5_HDMI_DEEP_COLOR_CONFIG_1_INIT_PACK_PHASE_SHIFT	8
@@ -179,7 +182,6 @@ vc4_hdmi_connector_detect(struct drm_connector *connector, bool force)
 	bool connected = false;
 
 	WARN_ON(pm_runtime_resume_and_get(&vc4_hdmi->pdev->dev));
-	WARN_ON(clk_prepare_enable(vc4_hdmi->hsm_clock));
 
 	if (vc4_hdmi->hpd_gpio) {
 		if (gpio_get_value_cansleep(vc4_hdmi->hpd_gpio) ^
@@ -209,7 +211,6 @@ vc4_hdmi_connector_detect(struct drm_connector *connector, bool force)
 	cec_phys_addr_invalidate(vc4_hdmi->cec_adap);
 
 out:
-	clk_disable_unprepare(vc4_hdmi->hsm_clock);
 	pm_runtime_put(&vc4_hdmi->pdev->dev);
 	return ret;
 }
@@ -877,6 +878,11 @@ static void vc5_hdmi_set_timings(struct vc4_hdmi *vc4_hdmi,
 	reg |= gcp_en ? VC5_HDMI_GCP_CONFIG_GCP_ENABLE : 0;
 	HDMI_WRITE(HDMI_GCP_CONFIG, reg);
 
+	reg = HDMI_READ(HDMI_MISC_CONTROL);
+	reg &= ~VC5_HDMI_MISC_CONTROL_PIXEL_REP_MASK;
+	reg |= VC4_SET_FIELD(0, VC5_HDMI_MISC_CONTROL_PIXEL_REP);
+	HDMI_WRITE(HDMI_MISC_CONTROL, reg);
+
 	HDMI_WRITE(HDMI_CLOCK_STOP, 0);
 }
 
@@ -920,7 +926,6 @@ static void vc4_hdmi_encoder_pre_crtc_configure(struct drm_encoder *encoder,
 	ret = pm_runtime_resume_and_get(&vc4_hdmi->pdev->dev);
 	if (ret < 0) {
 		DRM_ERROR("Failed to retain power domain: %d\n", ret);
-		pm_runtime_put(&vc4_hdmi->pdev->dev);
 		return;
 	}
 
@@ -928,24 +933,20 @@ static void vc4_hdmi_encoder_pre_crtc_configure(struct drm_encoder *encoder,
 	ret = clk_set_rate(vc4_hdmi->pixel_clock, pixel_rate);
 	if (ret) {
 		DRM_ERROR("Failed to set pixel clock rate: %d\n", ret);
-		pm_runtime_put(&vc4_hdmi->pdev->dev);
-		return;
+		goto err_runtime_pm;
 	}
 
 	ret = clk_prepare_enable(vc4_hdmi->pixel_clock);
 	if (ret) {
 		DRM_ERROR("Failed to turn on pixel clock: %d\n", ret);
-		pm_runtime_put(&vc4_hdmi->pdev->dev);
-		return;
+		goto err_runtime_pm;
 	}
 
 	hsm_rate = vc4_hdmi->variant->calc_hsm_clock(vc4_hdmi, pixel_rate);
 	vc4_hdmi->hsm_req = clk_request_start(vc4_hdmi->hsm_clock, hsm_rate);
 	if (IS_ERR(vc4_hdmi->hsm_req)) {
 		DRM_ERROR("Failed to set HSM clock rate: %ld\n", PTR_ERR(vc4_hdmi->hsm_req));
-		clk_disable_unprepare(vc4_hdmi->pixel_clock);
-		pm_runtime_put(&vc4_hdmi->pdev->dev);
-		return;
+		goto err_disable_pixel_clk;
 	}
 
 	vc4_hdmi_cec_update_clk_div(vc4_hdmi);
@@ -957,25 +958,18 @@ static void vc4_hdmi_encoder_pre_crtc_configure(struct drm_encoder *encoder,
 	else
 		bvb_rate = 75000000;
 
-	if (vc4_hdmi->pixel_bvb_clock)
+	if (vc4_hdmi->pixel_bvb_clock) {
 		vc4_hdmi->bvb_req = clk_request_start(vc4_hdmi->pixel_bvb_clock, bvb_rate);
-	if (IS_ERR(vc4_hdmi->bvb_req)) {
-		DRM_ERROR("Failed to set pixel bvb clock rate: %ld\n", PTR_ERR(vc4_hdmi->bvb_req));
-		clk_request_done(vc4_hdmi->hsm_req);
-		clk_disable_unprepare(vc4_hdmi->pixel_clock);
-		pm_runtime_put(&vc4_hdmi->pdev->dev);
-		return;
+		if (IS_ERR(vc4_hdmi->bvb_req)) {
+			DRM_ERROR("Failed to set pixel bvb clock rate: %ld\n", PTR_ERR(vc4_hdmi->bvb_req));
+			goto err_remove_hsm_req;
+		}
 	}
 
 	ret = clk_prepare_enable(vc4_hdmi->pixel_bvb_clock);
 	if (ret) {
 		DRM_ERROR("Failed to turn on pixel bvb clock: %d\n", ret);
-		if (vc4_hdmi->bvb_req)
-			clk_request_done(vc4_hdmi->bvb_req);
-		clk_request_done(vc4_hdmi->hsm_req);
-		clk_disable_unprepare(vc4_hdmi->pixel_clock);
-		pm_runtime_put(&vc4_hdmi->pdev->dev);
-		return;
+		goto err_remove_bvb_req;
 	}
 
 	if (vc4_hdmi->variant->phy_init)
@@ -988,6 +982,19 @@ static void vc4_hdmi_encoder_pre_crtc_configure(struct drm_encoder *encoder,
 
 	if (vc4_hdmi->variant->set_timings)
 		vc4_hdmi->variant->set_timings(vc4_hdmi, conn_state, mode);
+
+	return;
+
+err_remove_bvb_req:
+	if (vc4_hdmi->bvb_req)
+		clk_request_done(vc4_hdmi->bvb_req);
+err_remove_hsm_req:
+	clk_request_done(vc4_hdmi->hsm_req);
+err_disable_pixel_clk:
+	clk_disable_unprepare(vc4_hdmi->pixel_clock);
+err_runtime_pm:
+	pm_runtime_put(&vc4_hdmi->pdev->dev);
+	return;
 }
 
 static void vc4_hdmi_encoder_pre_crtc_enable(struct drm_encoder *encoder,
