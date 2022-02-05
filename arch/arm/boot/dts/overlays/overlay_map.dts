@@ -5,6 +5,10 @@
 		deprecated = "use i2c-sensor,bmp085";
 	};
 
+	cutiepi-panel {
+		bcm2711;
+	};
+
 	highperi {
 		bcm2711;
 	};
@@ -145,6 +149,10 @@
 
 	vc4-fkms-v3d-pi4 {
 		bcm2711;
+	};
+
+	vc4-kms-dpi-at056tn53v1 {
+		deprecated = "use vc4-kms-dpi-panel,at056tn53v1";
 	};
 
 	vc4-kms-v3d {

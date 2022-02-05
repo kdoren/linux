@@ -135,6 +135,34 @@ static const struct hvs_format {
 		.pixel_order = HVS_PIXEL_ORDER_XYCBCR,
 		.hvs5_only = true,
 	},
+	{
+		.drm = DRM_FORMAT_XRGB2101010,
+		.hvs = HVS_PIXEL_FORMAT_RGBA1010102,
+		.pixel_order = HVS_PIXEL_ORDER_ABGR,
+		.pixel_order_hvs5 = HVS_PIXEL_ORDER_ARGB,
+		.hvs5_only = true,
+	},
+	{
+		.drm = DRM_FORMAT_ARGB2101010,
+		.hvs = HVS_PIXEL_FORMAT_RGBA1010102,
+		.pixel_order = HVS_PIXEL_ORDER_ABGR,
+		.pixel_order_hvs5 = HVS_PIXEL_ORDER_ARGB,
+		.hvs5_only = true,
+	},
+	{
+		.drm = DRM_FORMAT_ABGR2101010,
+		.hvs = HVS_PIXEL_FORMAT_RGBA1010102,
+		.pixel_order = HVS_PIXEL_ORDER_ARGB,
+		.pixel_order_hvs5 = HVS_PIXEL_ORDER_ABGR,
+		.hvs5_only = true,
+	},
+	{
+		.drm = DRM_FORMAT_XBGR2101010,
+		.hvs = HVS_PIXEL_FORMAT_RGBA1010102,
+		.pixel_order = HVS_PIXEL_ORDER_ARGB,
+		.pixel_order_hvs5 = HVS_PIXEL_ORDER_ABGR,
+		.hvs5_only = true,
+	},
 };
 
 static const struct hvs_format *vc4_get_hvs_format(u32 drm_format)
@@ -667,6 +695,48 @@ static const u32 colorspace_coeffs[2][DRM_COLOR_ENCODING_MAX][3] = {
 	}
 };
 
+static u32 vc4_hvs4_get_alpha_blend_mode(struct drm_plane_state *state)
+{
+	if (!state->fb->format->has_alpha)
+		return VC4_SET_FIELD(SCALER_POS2_ALPHA_MODE_FIXED,
+				     SCALER_POS2_ALPHA_MODE);
+
+	switch (state->pixel_blend_mode) {
+	case DRM_MODE_BLEND_PIXEL_NONE:
+		return VC4_SET_FIELD(SCALER_POS2_ALPHA_MODE_FIXED,
+				     SCALER_POS2_ALPHA_MODE);
+	default:
+	case DRM_MODE_BLEND_PREMULTI:
+		return VC4_SET_FIELD(SCALER_POS2_ALPHA_MODE_PIPELINE,
+				     SCALER_POS2_ALPHA_MODE) |
+			SCALER_POS2_ALPHA_PREMULT;
+	case DRM_MODE_BLEND_COVERAGE:
+		return VC4_SET_FIELD(SCALER_POS2_ALPHA_MODE_PIPELINE,
+				     SCALER_POS2_ALPHA_MODE);
+	}
+}
+
+static u32 vc4_hvs5_get_alpha_blend_mode(struct drm_plane_state *state)
+{
+	if (!state->fb->format->has_alpha)
+		return VC4_SET_FIELD(SCALER5_CTL2_ALPHA_MODE_FIXED,
+				     SCALER5_CTL2_ALPHA_MODE);
+
+	switch (state->pixel_blend_mode) {
+	case DRM_MODE_BLEND_PIXEL_NONE:
+		return VC4_SET_FIELD(SCALER5_CTL2_ALPHA_MODE_FIXED,
+				     SCALER5_CTL2_ALPHA_MODE);
+	default:
+	case DRM_MODE_BLEND_PREMULTI:
+		return VC4_SET_FIELD(SCALER5_CTL2_ALPHA_MODE_PIPELINE,
+				     SCALER5_CTL2_ALPHA_MODE) |
+			SCALER5_CTL2_ALPHA_PREMULT;
+	case DRM_MODE_BLEND_COVERAGE:
+		return VC4_SET_FIELD(SCALER5_CTL2_ALPHA_MODE_PIPELINE,
+				     SCALER5_CTL2_ALPHA_MODE);
+	}
+}
+
 /* Writes out a full display list for an active plane to the plane's
  * private dlist state.
  */
@@ -813,53 +883,34 @@ static int vc4_plane_mode_set(struct drm_plane *plane,
 	case DRM_FORMAT_MOD_BROADCOM_SAND128:
 	case DRM_FORMAT_MOD_BROADCOM_SAND256: {
 		uint32_t param = fourcc_mod_broadcom_param(fb->modifier);
-		u32 tile_w, tile, x_off, pix_per_tile;
+
+		if (param > SCALER_TILE_HEIGHT_MASK) {
+			DRM_DEBUG_KMS("SAND height too large (%d)\n",
+				      param);
+			return -EINVAL;
+		}
 
 		if (fb->format->format == DRM_FORMAT_P030) {
-			/*
-			 * Spec says: bits [31:4] of the given address should point to
-			 * the 128-bit word containing the desired starting pixel,
-			 * and bits[3:0] should be between 0 and 11, indicating which
-			 * of the 12-pixels in that 128-bit word is the first pixel to be used
-			 */
-	                u32 remaining_pixels = vc4_state->src_x % 96;
-			u32 aligned = remaining_pixels / 12;
-			u32 last_bits = remaining_pixels % 12;
-
-			x_off = aligned * 16 + last_bits;
 			hvs_format = HVS_PIXEL_FORMAT_YCBCR_10BIT;
 			tiling = SCALER_CTL0_TILING_128B;
-			tile_w = 128;
-			pix_per_tile = 96;
 		} else {
 			hvs_format = HVS_PIXEL_FORMAT_H264;
 
 			switch (base_format_mod) {
 			case DRM_FORMAT_MOD_BROADCOM_SAND64:
 				tiling = SCALER_CTL0_TILING_64B;
-				tile_w = 64;
 				break;
 			case DRM_FORMAT_MOD_BROADCOM_SAND128:
 				tiling = SCALER_CTL0_TILING_128B;
-				tile_w = 128;
 				break;
 			case DRM_FORMAT_MOD_BROADCOM_SAND256:
 				tiling = SCALER_CTL0_TILING_256B_OR_T;
-				tile_w = 256;
 				break;
 			default:
-				break;
+				return -EINVAL;
 			}
-			pix_per_tile = tile_w / fb->format->cpp[0];
-			x_off = (vc4_state->src_x % pix_per_tile) /
-				(i ? h_subsample : 1) * fb->format->cpp[i];
 		}
-		if (param > SCALER_TILE_HEIGHT_MASK) {
-			DRM_DEBUG_KMS("SAND height too large (%d)\n",
-				      param);
-			return -EINVAL;
-		}
-		tile = vc4_state->src_x / pix_per_tile;
+
 		/* Adjust the base pointer to the first pixel to be scanned
 		 * out.
 		 *
@@ -871,6 +922,46 @@ static int vc4_plane_mode_set(struct drm_plane *plane,
 		 * should be 6.
 		 */
 		for (i = 0; i < num_planes; i++) {
+			u32 tile_w, tile, x_off, pix_per_tile;
+
+			if (fb->format->format == DRM_FORMAT_P030) {
+				/*
+				 * Spec says: bits [31:4] of the given address
+				 * should point to the 128-bit word containing
+				 * the desired starting pixel, and bits[3:0]
+				 * should be between 0 and 11, indicating which
+				 * of the 12-pixels in that 128-bit word is the
+				 * first pixel to be used
+				 */
+				u32 remaining_pixels = vc4_state->src_x % 96;
+				u32 aligned = remaining_pixels / 12;
+				u32 last_bits = remaining_pixels % 12;
+
+				x_off = aligned * 16 + last_bits;
+				tile_w = 128;
+				pix_per_tile = 96;
+			} else {
+				switch (base_format_mod) {
+				case DRM_FORMAT_MOD_BROADCOM_SAND64:
+					tile_w = 64;
+					break;
+				case DRM_FORMAT_MOD_BROADCOM_SAND128:
+					tile_w = 128;
+					break;
+				case DRM_FORMAT_MOD_BROADCOM_SAND256:
+					tile_w = 256;
+					break;
+				default:
+					return -EINVAL;
+				}
+				pix_per_tile = tile_w / fb->format->cpp[0];
+				x_off = (vc4_state->src_x % pix_per_tile) /
+					(i ? h_subsample : 1) *
+					fb->format->cpp[i];
+			}
+
+			tile = vc4_state->src_x / pix_per_tile;
+
 			vc4_state->offsets[i] += param * tile_w * tile;
 			vc4_state->offsets[i] += src_y /
 						 (i ? v_subsample : 1) *
@@ -928,13 +1019,8 @@ static int vc4_plane_mode_set(struct drm_plane *plane,
 		/* Position Word 2: Source Image Size, Alpha */
 		vc4_state->pos2_offset = vc4_state->dlist_count;
 		vc4_dlist_write(vc4_state,
-				VC4_SET_FIELD(fb->format->has_alpha ?
-					      SCALER_POS2_ALPHA_MODE_PIPELINE :
-					      SCALER_POS2_ALPHA_MODE_FIXED,
-					      SCALER_POS2_ALPHA_MODE) |
 				(mix_plane_alpha ? SCALER_POS2_ALPHA_MIX : 0) |
-				(fb->format->has_alpha ?
-						SCALER_POS2_ALPHA_PREMULT : 0) |
+				vc4_hvs4_get_alpha_blend_mode(state) |
 				VC4_SET_FIELD(vc4_state->src_w[0],
 					      SCALER_POS2_WIDTH) |
 				VC4_SET_FIELD(vc4_state->src_h[0],
@@ -979,14 +1065,9 @@ static int vc4_plane_mode_set(struct drm_plane *plane,
 		vc4_dlist_write(vc4_state,
 				VC4_SET_FIELD(state->alpha >> 4,
 					      SCALER5_CTL2_ALPHA) |
-				(fb->format->has_alpha ?
-					SCALER5_CTL2_ALPHA_PREMULT : 0) |
+				vc4_hvs5_get_alpha_blend_mode(state) |
 				(mix_plane_alpha ?
-					SCALER5_CTL2_ALPHA_MIX : 0) |
-				VC4_SET_FIELD(fb->format->has_alpha ?
-				      SCALER5_CTL2_ALPHA_MODE_PIPELINE :
-				      SCALER5_CTL2_ALPHA_MODE_FIXED,
-				      SCALER5_CTL2_ALPHA_MODE)
+					SCALER5_CTL2_ALPHA_MIX : 0)
 			       );
 
 		/* Position Word 1: Scaled Image Dimensions. */
@@ -1470,6 +1551,10 @@ struct drm_plane *vc4_plane_init(struct drm_device *dev,
 	drm_plane_helper_add(plane, &vc4_plane_helper_funcs);
 
 	drm_plane_create_alpha_property(plane);
+	drm_plane_create_blend_mode_property(plane,
+					     BIT(DRM_MODE_BLEND_PIXEL_NONE) |
+					     BIT(DRM_MODE_BLEND_PREMULTI) |
+					     BIT(DRM_MODE_BLEND_COVERAGE));
 	drm_plane_create_rotation_property(plane, DRM_MODE_ROTATE_0,
 					   DRM_MODE_ROTATE_0 |
 					   DRM_MODE_ROTATE_180 |
