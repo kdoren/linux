@@ -202,6 +202,7 @@
 			      IRQ_CONSTRAINTS, regs, vector);		\
 }
 
+#ifndef CONFIG_PREEMPT_RT
 /*
  * Macro to invoke __do_softirq on the irq stack. This is only called from
  * task context when bottom halves are about to be reenabled and soft
@@ -214,6 +215,8 @@
 	call_on_irqstack(__do_softirq, ASM_CALL_ARG0);			\
 	__this_cpu_write(hardirq_stack_inuse, false);			\
 }
+
+#endif
 
 #else /* CONFIG_X86_64 */
 /* System vector handlers always run on the stack they interrupted. */
